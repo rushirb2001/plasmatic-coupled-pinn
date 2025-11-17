@@ -260,7 +260,7 @@ $$\text{FRMSE}_t = \frac{1}{N_x}\sum_{j=1}^{N_x} \sqrt{\frac{1}{N_t}\sum_{i=1}^{
 
 Normalized by spectral energy of true field for scale-invariance.
 
-## Experimental Results
+<!-- ## Experimental Results
 
 ### Best Results (Without FDM Data)
 
@@ -339,7 +339,7 @@ Configuration: $R_0 = 2.7 \times 10^{20}$, $V_0 = 100$ V, trained with FDM data 
 - Spectral FRMSE($n_e$) along $x$: $0.004917$
 - Spectral FRMSE($\phi$) along $x$: $0.017183$
 - Temporal FRMSE($n_e$) averaged over $x$: $0.000273$
-- Temporal FRMSE($\phi$) averaged over $x$: $0.000247$
+- Temporal FRMSE($\phi$) averaged over $x$: $0.000247$ -->
 
 ## Non-Dimensionalization
 

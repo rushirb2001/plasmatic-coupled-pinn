@@ -1,0 +1,69 @@
+# ============================================================================
+# Example Configuration: CCPPinn Training
+# ============================================================================
+# Usage: python -m src.trainer fit --config configs/ccppinn_default.yaml
+
+# Seed for reproducibility
+seed_everything: 42
+
+# Trainer configuration
+trainer:
+  max_epochs: 200
+  accelerator: mps  # Use Apple Silicon GPU
+  devices: 1
+  precision: 32
+  log_every_n_steps: 1  # Log every step for better monitoring
+  gradient_clip_val: 1.0
+  enable_progress_bar: true
+  enable_model_summary: true
+
+# Model configuration
+model:
+  class_path: src.model.CCPPinn
+  init_args:
+    # Architecture
+    hidden_dims: [256, 256, 256]
+    use_fourier: true
+    fourier_scale: 10.0
+    num_fourier_features: 32
+    log_space_ne: true
+    activation: tanh
+    
+    # Training
+    learning_rate: 1.0e-3
+    optimizer: adamw
+    scheduler: cosine
+    weight_decay: 0.0
+    warmup_steps: 0
+    
+    # Loss weights
+    loss_weights:
+      continuity: 1.0
+      poisson: 1.0
+      bc: 10.0
+    
+    # Experiment
+    enable_benchmarking: false
+    experiment_name: ccppinn_default
+
+# Data configuration
+data:
+  batch_size: 256
+  num_collocation_points: 20000
+  domain_length: 0.025
+  time_duration: 4.0e-7  # ~5 RF cycles
+  sampler_type: uniform
+  num_workers: 0
+
+# Optimizer override (optional, model config takes precedence)
+# optimizer:
+#   class_path: torch.optim.AdamW
+#   init_args:
+#     lr: 1.0e-3
+#     weight_decay: 0.0
+
+# LR Scheduler override (optional)
+# lr_scheduler:
+#   class_path: torch.optim.lr_scheduler.CosineAnnealingLR
+#   init_args:
+#     T_max: 1000

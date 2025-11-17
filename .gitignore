@@ -1,1 +1,7 @@
+README.md
 CLAUDE.md
+*.png
+*.md
+/experiments
+
+**/**/__pycache__
