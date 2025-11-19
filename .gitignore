@@ -1,8 +1,70 @@
-README.md
-CLAUDE.md
-*.png
-*.md
-/experiments
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
 
-**/**/__pycache__
-1D_CCP_Model/*
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Poetry
+# poetry.lock is typically committed for reproducibility
+# Uncomment to ignore if you don't want to commit the lock file
+# poetry.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+
+# Project specific
+/experiments/
+/archive/
+wandb/
+*.png
+*.gif
+
+# Logs
+*.log
+logs/
+
+# Model checkpoints (if large)
+*.ckpt
+*.pt
+*.pth
+
+# Documentation builds
+docs/_build/
+site/
+
+# Root-level markdown (keep README and docs/)
+*.md
+!README.md
+!docs/*.md

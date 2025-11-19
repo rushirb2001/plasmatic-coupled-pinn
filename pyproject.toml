@@ -1,0 +1,97 @@
+[tool.poetry]
+name = "plasmatic-coupled-pinn"
+version = "1.0.0"
+description = "Physics-Informed Neural Networks for Capacitively Coupled Plasma (CCP-II) Simulation"
+authors = ["Rushir Bhavsar"]
+readme = "README.md"
+license = "MIT"
+packages = [{include = "src"}]
+keywords = ["physics-informed-neural-networks", "plasma-simulation", "pytorch", "deep-learning"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+torch = "*"
+pytorch-lightning = "*"
+torchmetrics = "*"
+numpy = "*"
+scipy = "*"
+pyyaml = "*"
+matplotlib = "*"
+rich = "*"
+imageio = "*"
+jsonargparse = {extras = ["signatures"], version = "*"}
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+pytest-cov = "*"
+black = "*"
+ruff = "*"
+mypy = "*"
+
+[tool.poetry.group.tracking.dependencies]
+wandb = "*"
+tensorboard = "*"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+train = "src.trainer:main"
+validate = "scripts.validate_experiments:main"
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+    | \.venv
+    | archive
+    | experiments
+)/
+'''
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = [
+    ".git",
+    ".venv",
+    "archive",
+    "experiments",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+    "B008",  # do not perform function calls in argument defaults
+]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+exclude = [
+    "archive/",
+    "experiments/",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
