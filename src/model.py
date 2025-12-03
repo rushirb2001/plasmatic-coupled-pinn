@@ -1,525 +1,781 @@
-# ============================================================================
-# src/model.py
-# ============================================================================
 """
-Module: model
-Description:
-    PyTorch Lightning model library for CCP-II PINN.
-    Adapted from original model.py with proper BaseModel pattern.
-    
-    BaseModel provides the common PINN training loop, handling:
-    - PDE residual computation
-    - Boundary condition enforcement
-    - Metric tracking
-    - Optimizer/scheduler configuration
-    
-    Inherited models (CCPPinn, etc.) define:
-    - Custom forward() with specific architecture
-    - Architecture-specific hyperparameters
+PINN Models for CCP-II Plasma Simulation.
+
+This module provides:
+- BasePINN: PyTorch Lightning base class with MLP that works out of the box
+- Specialized PINN variants that inherit and add specific features
+- MODEL_REGISTRY: Dictionary mapping hyphenated names to classes for YAML lookup
+
+Usage with Lightning CLI:
+    model:
+      class_path: src.model.SequentialPINN  # or use registry lookup
+      init_args:
+        hidden_layers: [64, 64, 64]
 """
 
+import math
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import pytorch_lightning as pl
-import numpy as np
-from typing import Optional, Any, Tuple, List
-
 import torchmetrics
 
-from src.utils.richco import console
-from src.utils.physics import PhysicalConstants, DefaultParameters, ScalingParameters
+from src.architectures import (
+    MLP,
+    SequentialModel,
+    GatedSequentialModel,
+    ModulatedPINN,
+    FourierMLP,
+    TwoNetworkModel,
+    DensityNetwork,
+    PotentialNetwork,
+    PoissonSolverCPU,
+    PoissonSolverGPU,
+    FieldCache,
+)
+from src.utils.physics import ParameterSpace, PhysicalConstants
+from src.utils.nondim import NonDimensionalizer
+from src.utils.gradients import AdaptiveLossBalancer, GradientMonitor
+from src.visualization.plotting import visualize_model
+from src.visualization.gif_generator import generate_model_animation
 
 
-class BaseModel(pl.LightningModule):
+class BasePINN(pl.LightningModule):
     """
-    Base model for PINN implementations.
-    
-    Provides complete training/validation/test loop for physics-informed neural networks.
-    All PINN models should inherit from this class and implement forward().
+    Base PINN model for CCP-II plasma simulation.
+
+    Uses a simple MLP architecture by default and works out of the box.
+    Subclasses can override `build_network()` to use different architectures.
+
+    Features:
+    - Complete training/validation/test loops for physics-informed learning
+    - PDE residual computation for continuity and Poisson equations
+    - Boundary condition enforcement
+    - Configurable optimizer and scheduler
+    - Automatic metric tracking
+
+    Args:
+        hidden_layers: List of hidden layer dimensions
+        activation: Activation function ('tanh', 'relu', 'gelu', 'silu')
+        learning_rate: Learning rate for optimizer
+        optimizer: Optimizer type ('adam', 'adamw', 'sgd')
+        scheduler: Scheduler type ('constant', 'cosine', 'step')
+        loss_weights: Dictionary of loss component weights
+        params_path: Path to physics parameters YAML (optional)
     """
-    
+
     def __init__(
-            self,
-            learning_rate: float = 1e-3,
-            optimizer: str = 'adamw',
-            scheduler: str = 'constant',
-            warmup_steps: int = 0,
-            weight_decay: float = 0.0,
-            loss_weights: dict = None,
-            enable_benchmarking: bool = False,
-            experiment_name: str = "default",
-            **kwargs: Any
+        self,
+        hidden_layers: List[int] = None,
+        activation: str = "tanh",
+        learning_rate: float = 1e-3,
+        optimizer: str = "adamw",
+        scheduler: str = "cosine",
+        warmup_steps: int = 0,
+        weight_decay: float = 0.0,
+        loss_weights: Dict[str, float] = None,
+        params_path: Optional[str] = None,
+        use_adaptive_weights: bool = False,
+        adaptive_alpha: float = 0.9,
+        visualize_on_train_end: bool = True,
+        output_dir: str = "./experiments",
+        **kwargs: Any
     ):
         super().__init__()
         self.save_hyperparameters()
 
+        # Defaults
+        if hidden_layers is None:
+            hidden_layers = [64, 64, 64]
+        if loss_weights is None:
+            loss_weights = {"continuity": 1.0, "poisson": 1.0, "bc": 10.0}
+
+        self.hidden_layers = hidden_layers
+        self.activation = activation
         self.learning_rate = learning_rate
         self.optimizer_name = optimizer
         self.scheduler_name = scheduler
         self.warmup_steps = warmup_steps
         self.weight_decay = weight_decay
-        self.enable_benchmarking = enable_benchmarking
-        self.experiment_name = experiment_name
-        
-        # Default loss weights
-        if loss_weights is None:
-            loss_weights = {'continuity': 1.0, 'poisson': 1.0, 'bc': 10.0}
         self.loss_weights = loss_weights
+        self.use_adaptive_weights = use_adaptive_weights
+        self.visualize_on_train_end = visualize_on_train_end
+        self.output_dir = output_dir
 
-        # Initialize physics parameters
-        self.params = DefaultParameters()
-        self.scales = ScalingParameters()
-        
-        # Metrics for tracking physics losses
+        # Load physics parameters
+        if params_path:
+            self.params = ParameterSpace.from_yaml(params_path)
+        else:
+            self.params = ParameterSpace()
+
+        # Non-dimensionalization
+        self.nondim = NonDimensionalizer(self.params)
+
+        # Build the network
+        self.net = self.build_network()
+
+        # Adaptive loss balancing
+        if use_adaptive_weights:
+            self.loss_balancer = AdaptiveLossBalancer(
+                alpha=adaptive_alpha,
+                loss_names=["continuity", "poisson", "bc"],
+                initial_weights=loss_weights,
+            )
+        else:
+            self.loss_balancer = None
+
+        # Gradient monitoring
+        self.grad_monitor = GradientMonitor()
+
+        # Metrics
         self.train_metrics = torchmetrics.MetricCollection({
-            'loss_cont': torchmetrics.MeanMetric(),
-            'loss_pois': torchmetrics.MeanMetric(),
-            'loss_bc': torchmetrics.MeanMetric(),
+            "loss_cont": torchmetrics.MeanMetric(),
+            "loss_pois": torchmetrics.MeanMetric(),
+            "loss_bc": torchmetrics.MeanMetric(),
         })
-        self.val_metrics = self.train_metrics.clone(prefix='val_')
-        self.test_metrics = self.train_metrics.clone(prefix='test_')
-        
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        self.val_metrics = self.train_metrics.clone(prefix="val_")
+        self.test_metrics = self.train_metrics.clone(prefix="test_")
+
+    def build_network(self) -> nn.Module:
         """
-        Forward pass - to be implemented by subclass.
-        
+        Build the neural network architecture.
+
+        Override this method in subclasses to use different architectures.
+        Default: Simple MLP with 2 inputs (x, t) and 2 outputs (n_e, phi).
+        """
+        return MLP(
+            in_dim=2,
+            hidden_dims=self.hidden_layers,
+            out_dim=2,
+            activation=self.activation
+        )
+
+    def forward(self, x_t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass returning (n_e, phi).
+
         Args:
-            x: Spatial coordinate tensor (B, 1)
-            t: Temporal coordinate tensor (B, 1)
-            
+            x_t: Input tensor of shape [B, 2] with normalized coordinates
+
         Returns:
-            n_e: Electron density (B, 1) in physical units
-            phi: Electric potential (B, 1) in physical units
+            n_e: Electron density [B, 1]
+            phi: Electric potential [B, 1]
         """
-        raise NotImplementedError("Subclass must implement forward()")
-    
-    def compute_pde_residuals(self, x: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.net(x_t)
+
+    def compute_pde_residuals(
+        self, x_t: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute PDE residuals for the CCP-II model.
-        
-        This method is shared across all PINN models as the physics is the same.
-        Only the forward() architecture differs between models.
+        Compute PDE residuals for continuity and Poisson equations.
+
+        Uses automatic differentiation to compute spatial and temporal derivatives.
+        Returns scaled residuals for numerical stability.
         """
-        x.requires_grad_(True)
-        t.requires_grad_(True)
-        
-        # Forward returns physical quantities
-        n_e, phi = self(x, t)
-        
-        # Compute derivatives
-        dn_e_dt = torch.autograd.grad(n_e, t, grad_outputs=torch.ones_like(n_e), create_graph=True)[0]
-        dn_e_dx = torch.autograd.grad(n_e, x, grad_outputs=torch.ones_like(n_e), create_graph=True)[0]
-        dphi_dx = torch.autograd.grad(phi, x, grad_outputs=torch.ones_like(phi), create_graph=True)[0]
-        d2phi_dx2 = torch.autograd.grad(dphi_dx, x, grad_outputs=torch.ones_like(dphi_dx), create_graph=True)[0]
-        
-        # R(x) - Reaction rate
-        R_val = torch.zeros_like(x)
-        mask1 = (x >= self.params.x1) & (x <= self.params.x2)
-        mask2 = (x >= self.params.L - self.params.x2) & (x <= self.params.L - self.params.x1)
-        R_val[mask1 | mask2] = self.params.R0
-        
-        # n_i0 - Ion density
-        term_sqrt = (self.params.m_i / (PhysicalConstants.e * self.params.T_e))**0.5
-        n_i0_val = self.params.R0 * (self.params.x2 - self.params.x1) * term_sqrt
-        n_i0 = torch.full_like(x, n_i0_val)
-        
-        # Gamma_e - Electron flux
-        Gamma_e = -self.params.D * dn_e_dx - self.params.mu * n_e * dphi_dx
-        dGamma_e_dx = torch.autograd.grad(Gamma_e, x, grad_outputs=torch.ones_like(Gamma_e), create_graph=True)[0]
-        
-        # Physical Residuals
+        x_t = x_t.clone().requires_grad_(True)
+
+        n_e, phi = self(x_t)
+
+        # Compute gradients
+        ones = torch.ones_like(n_e)
+
+        # dn_e/dx, dn_e/dt
+        grad_ne = torch.autograd.grad(n_e, x_t, ones, create_graph=True)[0]
+        dn_e_dx = grad_ne[:, 0:1]
+        dn_e_dt = grad_ne[:, 1:2]
+
+        # dphi/dx
+        grad_phi = torch.autograd.grad(phi, x_t, ones, create_graph=True)[0]
+        dphi_dx = grad_phi[:, 0:1]
+
+        # d2phi/dx2
+        d2phi_dx2 = torch.autograd.grad(
+            dphi_dx, x_t, ones, create_graph=True
+        )[0][:, 0:1]
+
+        # Physics coefficients (from non-dimensionalization)
+        coeff = self.nondim.coeffs
+
+        # Electron flux: Gamma_e = -D * dn_e/dx - mu * n_e * dphi/dx
+        Gamma_e = -coeff.alpha * dn_e_dx - coeff.beta * n_e * dphi_dx
+
+        # d(Gamma_e)/dx
+        dGamma_e_dx = torch.autograd.grad(
+            Gamma_e, x_t, ones, create_graph=True
+        )[0][:, 0:1]
+
+        # Reaction rate R(x) - symmetric reaction zones
+        x_norm = x_t[:, 0:1]
+        R_val = torch.zeros_like(x_norm)
+
+        # Reaction zone parameters (normalized)
+        d = self.params.domain
+        x1_norm = d.x1 / d.L
+        x2_norm = d.x2 / d.L
+
+        mask1 = (x_norm >= x1_norm) & (x_norm <= x2_norm)
+        mask2 = (x_norm >= 1.0 - x2_norm) & (x_norm <= 1.0 - x1_norm)
+        R_val = torch.where(mask1 | mask2, torch.ones_like(R_val), R_val)
+
+        # Ion density (normalized)
+        n_io = coeff.gamma
+
+        # Continuity residual: dn_e/dt + d(Gamma_e)/dx - R = 0
         res_cont = dn_e_dt + dGamma_e_dx - R_val
-        term_poisson = (PhysicalConstants.e / PhysicalConstants.epsilon_0) * (n_e - n_i0)
-        res_pois = d2phi_dx2 + term_poisson
-        
-        # Scale Residuals to O(1) for numerical stability
-        scale_cont = 1.0 / (self.scales.n_ref * self.params.f)
-        scale_pois = 1.0 / (self.scales.phi_ref / (self.scales.x_ref**2))
-        
-        return res_cont * scale_cont, res_pois * scale_pois
-    
+
+        # Poisson residual: d2phi/dx2 + delta*(n_e - n_io) = 0
+        res_pois = d2phi_dx2 + coeff.delta * (n_e - n_io)
+
+        return res_cont, res_pois
+
     def compute_boundary_loss(self, t: torch.Tensor) -> torch.Tensor:
         """
         Compute boundary condition losses.
-        
-        BCs:
-        - x=0: phi = V(t), n_e = 0
-        - x=L: phi = 0, n_e = 0
+
+        BCs (normalized coordinates):
+        - x=0: phi = sin(2*pi*t), n_e = 0
+        - x=1: phi = 0, n_e = 0
         """
+        B = t.shape[0]
+        device = t.device
+
         # Left boundary (x=0)
-        x0 = torch.zeros_like(t)
-        n_e_0, phi_0 = self(x0, t)
-        V_t = self.params.V0 * torch.sin(2 * torch.pi * self.params.f * t)
-        
-        loss_bc_left = (torch.mean((n_e_0 - 0)**2) / self.scales.n_ref**2 + 
-                        torch.mean((phi_0 - V_t)**2) / self.scales.phi_ref**2)
-        
-        # Right boundary (x=L)
-        xL = torch.full_like(t, self.params.L)
-        n_e_L, phi_L = self(xL, t)
-        loss_bc_right = (torch.mean((n_e_L - 0)**2) / self.scales.n_ref**2 + 
-                         torch.mean((phi_L - 0)**2) / self.scales.phi_ref**2)
-        
-        return loss_bc_left + loss_bc_right
+        x0 = torch.zeros(B, 1, device=device)
+        x_t_left = torch.cat([x0, t], dim=1)
+        n_e_0, phi_0 = self(x_t_left)
 
-    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        """Training step - compute losses and log metrics."""
-        x, t = batch
-        
-        # Compute PDE residuals
-        res_cont, res_pois = self.compute_pde_residuals(x, t)
+        # Driving voltage (normalized)
+        V_t = torch.sin(2 * math.pi * t)
+
+        loss_left = torch.mean(n_e_0**2) + torch.mean((phi_0 - V_t)**2)
+
+        # Right boundary (x=1)
+        x1 = torch.ones(B, 1, device=device)
+        x_t_right = torch.cat([x1, t], dim=1)
+        n_e_L, phi_L = self(x_t_right)
+
+        loss_right = torch.mean(n_e_L**2) + torch.mean(phi_L**2)
+
+        return loss_left + loss_right
+
+    def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
+        """Training step with PDE and BC losses."""
+        x_t = batch[0] if isinstance(batch, (list, tuple)) else batch
+
+        # PDE residuals
+        res_cont, res_pois = self.compute_pde_residuals(x_t)
         loss_cont = torch.mean(res_cont**2)
         loss_pois = torch.mean(res_pois**2)
-        
-        # Compute boundary condition loss
+
+        # Boundary condition loss
+        t = x_t[:, 1:2]
         loss_bc = self.compute_boundary_loss(t)
-        
+
+        # Get loss weights (static or adaptive)
+        if self.loss_balancer is not None:
+            # Update adaptive weights
+            losses = {
+                "continuity": loss_cont,
+                "poisson": loss_pois,
+                "bc": loss_bc
+            }
+            params = list(self.parameters())
+            weights = self.loss_balancer.update(losses, params)
+
+            # Log adaptive weights
+            self.log("weight/continuity", weights["continuity"], on_step=False, on_epoch=True)
+            self.log("weight/poisson", weights["poisson"], on_step=False, on_epoch=True)
+            self.log("weight/bc", weights["bc"], on_step=False, on_epoch=True)
+        else:
+            weights = self.loss_weights
+
         # Total loss
-        loss = (self.loss_weights['continuity'] * loss_cont + 
-                self.loss_weights['poisson'] * loss_pois + 
-                self.loss_weights['bc'] * loss_bc)
-        
-        # Update metrics
-        self.train_metrics['loss_cont'].update(loss_cont)
-        self.train_metrics['loss_pois'].update(loss_pois)
-        self.train_metrics['loss_bc'].update(loss_bc)
-        
-        # Logging - only log total loss on_step, use metrics for components
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        loss = (
+            weights["continuity"] * loss_cont +
+            weights["poisson"] * loss_pois +
+            weights["bc"] * loss_bc
+        )
+
+        # Metrics
+        self.train_metrics["loss_cont"].update(loss_cont)
+        self.train_metrics["loss_pois"].update(loss_pois)
+        self.train_metrics["loss_bc"].update(loss_bc)
+
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log_dict(self.train_metrics, on_step=False, on_epoch=True)
-        
+
         return loss
 
-    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        """Validation step - evaluate on validation set."""
-        x, t = batch
-        
-        # Need gradients for PDE residuals even in validation
+    def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
+        """Validation step."""
+        x_t = batch[0] if isinstance(batch, (list, tuple)) else batch
+
         with torch.enable_grad():
-            res_cont, res_pois = self.compute_pde_residuals(x, t)
-        
+            res_cont, res_pois = self.compute_pde_residuals(x_t)
+
         loss_cont = torch.mean(res_cont**2)
         loss_pois = torch.mean(res_pois**2)
-        
-        # Also compute BC loss for validation
+
+        t = x_t[:, 1:2]
         loss_bc = self.compute_boundary_loss(t)
-        
-        # Total validation loss (same as training)
-        loss = (self.loss_weights['continuity'] * loss_cont + 
-                self.loss_weights['poisson'] * loss_pois + 
-                self.loss_weights['bc'] * loss_bc)
-        
-        # Update metrics
-        self.val_metrics['loss_cont'].update(loss_cont)
-        self.val_metrics['loss_pois'].update(loss_pois)
-        self.val_metrics['loss_bc'].update(loss_bc)
-        
-        # Logging
-        self.log('val_loss', loss, on_epoch=True, prog_bar=True)
+
+        loss = (
+            self.loss_weights["continuity"] * loss_cont +
+            self.loss_weights["poisson"] * loss_pois +
+            self.loss_weights["bc"] * loss_bc
+        )
+
+        self.val_metrics["loss_cont"].update(loss_cont)
+        self.val_metrics["loss_pois"].update(loss_pois)
+        self.val_metrics["loss_bc"].update(loss_bc)
+
+        self.log("val_loss", loss, on_epoch=True, prog_bar=True)
         self.log_dict(self.val_metrics, on_step=False, on_epoch=True)
-        
+
         return loss
 
-    def test_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        """Test step - evaluate on test set."""
-        x, t = batch
-        
+    def test_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
+        """Test step."""
+        x_t = batch[0] if isinstance(batch, (list, tuple)) else batch
+
         with torch.enable_grad():
-            res_cont, res_pois = self.compute_pde_residuals(x, t)
-        
+            res_cont, res_pois = self.compute_pde_residuals(x_t)
+
         loss_cont = torch.mean(res_cont**2)
         loss_pois = torch.mean(res_pois**2)
         loss = loss_cont + loss_pois
-        
-        # Update metrics
-        self.test_metrics['loss_cont'].update(loss_cont)
-        self.test_metrics['loss_pois'].update(loss_pois)
-        
-        # Logging
-        self.log('test_loss', loss, on_epoch=True, prog_bar=True)
+
+        self.test_metrics["loss_cont"].update(loss_cont)
+        self.test_metrics["loss_pois"].update(loss_pois)
+
+        self.log("test_loss", loss, on_epoch=True, prog_bar=True)
         self.log_dict(self.test_metrics, on_step=False, on_epoch=True)
-        
+
         return loss
-    
-    def visualize_solution(self, save_path: str = None):
-        """
-        Visualize the trained PINN solution.
-        
-        Creates plots of electron density and electric potential over space and time.
-        """
-        import matplotlib.pyplot as plt
-        
-        if save_path is None:
-            save_path = f"experiments/{self.experiment_name}/solution_visualization.png"
-        
-        # Create output directory
-        from pathlib import Path
-        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        
-        # Generate evaluation grid
-        x = torch.linspace(0, self.params.L, 100, device=self.device)
-        t = torch.linspace(0, 4e-7, 100, device=self.device)  # 5 RF cycles
-        
-        grid_x, grid_t = torch.meshgrid(x, t, indexing='ij')
-        flat_x = grid_x.reshape(-1, 1)
-        flat_t = grid_t.reshape(-1, 1)
-        
-        # Evaluate model
-        self.eval()
-        with torch.no_grad():
-            n_e, phi = self(flat_x, flat_t)
-        
-        n_e = n_e.reshape(100, 100).cpu().numpy()
-        phi = phi.reshape(100, 100).cpu().numpy()
-        x_np = x.cpu().numpy()
-        t_np = t.cpu().numpy()
-        
-        # Create figure
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        
-        # Plot 1: Electron density heatmap
-        im1 = axes[0, 0].imshow(n_e, extent=[t_np[0]*1e6, t_np[-1]*1e6, x_np[0]*1e3, x_np[-1]*1e3], 
-                                aspect='auto', origin='lower', cmap='viridis')
-        axes[0, 0].set_title("Electron Density ($n_e$)")
-        axes[0, 0].set_xlabel("Time (μs)")
-        axes[0, 0].set_ylabel("Position (mm)")
-        plt.colorbar(im1, ax=axes[0, 0], label='Density (m⁻³)')
-        
-        # Plot 2: Electric potential heatmap
-        im2 = axes[0, 1].imshow(phi, extent=[t_np[0]*1e6, t_np[-1]*1e6, x_np[0]*1e3, x_np[-1]*1e3],
-                                aspect='auto', origin='lower', cmap='plasma')
-        axes[0, 1].set_title("Electric Potential ($\\phi$)")
-        axes[0, 1].set_xlabel("Time (μs)")
-        axes[0, 1].set_ylabel("Position (mm)")
-        plt.colorbar(im2, ax=axes[0, 1], label='Potential (V)')
-        
-        # Plot 3: Spatial profiles at different times
-        time_indices = [0, 25, 50, 75, 99]
-        for i, idx in enumerate(time_indices):
-            axes[1, 0].plot(x_np*1e3, n_e[:, idx], label=f't={t_np[idx]*1e6:.2f}μs', alpha=0.7)
-        axes[1, 0].set_xlabel("Position (mm)")
-        axes[1, 0].set_ylabel("Electron Density (m⁻³)")
-        axes[1, 0].set_title("Spatial Profiles of $n_e$")
-        axes[1, 0].legend()
-        axes[1, 0].grid(True, alpha=0.3)
-        
-        # Plot 4: Temporal evolution at different positions
-        pos_indices = [0, 25, 50, 75, 99]
-        for i, idx in enumerate(pos_indices):
-            axes[1, 1].plot(t_np*1e6, phi[idx, :], label=f'x={x_np[idx]*1e3:.1f}mm', alpha=0.7)
-        axes[1, 1].set_xlabel("Time (μs)")
-        axes[1, 1].set_ylabel("Electric Potential (V)")
-        axes[1, 1].set_title("Temporal Evolution of $\\phi$")
-        axes[1, 1].legend()
-        axes[1, 1].grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        console.log(f"[green]✓[/green] Saved visualization to: {save_path}")
-        plt.close()
-        
-        return save_path
-    
-    def on_train_end(self):
-        """
-        Called automatically at the end of training.
-        Generates visualization of the solution.
-        """
-        console.log("\n[cyan]Training complete! Generating visualization...[/cyan]")
-        try:
-            save_path = self.visualize_solution()
-            console.log(f"[green]✓[/green] Visualization complete!")
-        except Exception as e:
-            console.log(f"[red]✗[/red] Visualization failed: {e}")
-    
+
     def configure_optimizers(self):
-        """Configure optimizer and scheduler."""
-        if self.optimizer_name == 'adamw':
-            optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
-        elif self.optimizer_name == 'adam':
-            optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        """Configure optimizer and learning rate scheduler."""
+        if self.optimizer_name == "adamw":
+            optimizer = torch.optim.AdamW(
+                self.parameters(),
+                lr=self.learning_rate,
+                weight_decay=self.weight_decay
+            )
+        elif self.optimizer_name == "adam":
+            optimizer = torch.optim.Adam(
+                self.parameters(),
+                lr=self.learning_rate,
+                weight_decay=self.weight_decay
+            )
+        elif self.optimizer_name == "sgd":
+            optimizer = torch.optim.SGD(
+                self.parameters(),
+                lr=self.learning_rate,
+                weight_decay=self.weight_decay,
+                momentum=0.9
+            )
         else:
             optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
 
-        if self.scheduler_name == 'linear' or self.scheduler_name == 'cosine':
+        if self.scheduler_name == "cosine":
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, 
+                optimizer,
                 T_max=self.trainer.estimated_stepping_batches
             )
             return {
-                'optimizer': optimizer,
-                'lr_scheduler': {
-                    'scheduler': scheduler,
-                    'interval': 'step',
-                    'frequency': 1
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step",
+                    "frequency": 1
                 }
             }
-        
+        elif self.scheduler_name == "step":
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=1000,
+                gamma=0.5
+            )
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": scheduler
+            }
+
         return optimizer
 
+    def on_train_end(self):
+        """Generate visualizations at end of training."""
+        if not self.visualize_on_train_end:
+            return
 
-# ============================================================================
-# Model Components
-# ============================================================================
+        output_path = Path(self.output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
 
-class FourierFeatureMapping(nn.Module):
-    """Fourier feature mapping for input coordinates."""
-    
-    def __init__(self, input_dim: int, num_features: int, scale: float = 10.0):
-        super().__init__()
-        self.B = nn.Parameter(torch.randn(input_dim, num_features) * scale, requires_grad=False)
+        try:
+            visualize_model(
+                model=self,
+                nx=100,
+                nt=100,
+                save_dir=str(output_path / "visualizations"),
+                device=str(self.device),
+            )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        projection = 2 * np.pi * x @ self.B
-        return torch.cat([torch.sin(projection), torch.cos(projection)], dim=-1)
-
-
-class MLP(nn.Module):
-    """Multi-layer perceptron backbone."""
-    
-    def __init__(self, input_dim: int, hidden_dims: List[int], output_dim: int, activation: str = 'tanh'):
-        super().__init__()
-        layers = []
-        prev_dim = input_dim
-        
-        if activation == 'tanh':
-            act_fn = nn.Tanh()
-        elif activation == 'relu':
-            act_fn = nn.ReLU()
-        elif activation == 'gelu':
-            act_fn = nn.GELU()
-        else:
-            act_fn = nn.Tanh()
-
-        for h_dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, h_dim))
-            layers.append(act_fn)
-            prev_dim = h_dim
-        
-        layers.append(nn.Linear(prev_dim, output_dim))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+            generate_model_animation(
+                model=self,
+                save_path=str(output_path / "visualizations" / "solution.gif"),
+                nx=100,
+                nt=100,
+                fps=30,
+                device=str(self.device),
+            )
+        except Exception as e:
+            print(f"Visualization failed: {e}")
 
 
-# ============================================================================
-# PINN Models
-# ============================================================================
-
-class CCPPinn(BaseModel):
+class SequentialPINN(BasePINN):
     """
-    Capacitively Coupled Plasma PINN model.
-    
-    Default architecture: MLP with optional Fourier features.
-    All hyperparameters can be overridden via YAML config.
+    PINN with FFM + MLP architecture and exact BC enforcement.
+
+    Uses Fourier Feature Mapping for better high-frequency learning.
     """
-    
+
     def __init__(
-            self,
-            hidden_dims: List[int] = None,
-            use_fourier: bool = True,
-            fourier_scale: float = 10.0,
-            num_fourier_features: int = 32,
-            log_space_ne: bool = True,
-            activation: str = 'tanh',
-            **kwargs: Any
+        self,
+        hidden_layers: List[int] = None,
+        num_ffm_frequencies: int = 2,
+        exact_bc: bool = True,
+        **kwargs: Any
     ):
-        # Set defaults
-        if hidden_dims is None:
-            hidden_dims = [64, 64, 64]
-            
+        self.num_ffm_frequencies = num_ffm_frequencies
+        self.exact_bc = exact_bc
+        super().__init__(hidden_layers=hidden_layers, **kwargs)
+
+    def build_network(self) -> nn.Module:
+        layers = self.hidden_layers + [2]
+        return SequentialModel(
+            layers=layers,
+            num_ffm_frequencies=self.num_ffm_frequencies,
+            exact_bc=self.exact_bc
+        )
+
+
+class GatedPINN(BasePINN):
+    """
+    PINN with FFM + Gated MLP architecture.
+
+    Uses modulation encoders for better gradient flow.
+    """
+
+    def __init__(
+        self,
+        hidden_layers: List[int] = None,
+        num_ffm_frequencies: int = 2,
+        exact_bc: bool = True,
+        **kwargs: Any
+    ):
+        self.num_ffm_frequencies = num_ffm_frequencies
+        self.exact_bc = exact_bc
+        super().__init__(hidden_layers=hidden_layers, **kwargs)
+
+    def build_network(self) -> nn.Module:
+        layers = self.hidden_layers + [2]
+        return GatedSequentialModel(
+            layers=layers,
+            num_ffm_frequencies=self.num_ffm_frequencies,
+            exact_bc=self.exact_bc
+        )
+
+
+class ModulatedPINNModel(BasePINN):
+    """
+    PINN with modulated gating architecture.
+
+    Lightweight alternative to full gated model.
+    """
+
+    def __init__(
+        self,
+        hidden_layers: List[int] = None,
+        **kwargs: Any
+    ):
+        super().__init__(hidden_layers=hidden_layers, **kwargs)
+
+    def build_network(self) -> nn.Module:
+        layers = [2] + self.hidden_layers + [2]
+        return ModulatedPINN(layers=layers)
+
+
+class FourierPINN(BasePINN):
+    """
+    PINN with random Fourier features.
+
+    Uses fixed random B matrix for frequency encoding.
+    """
+
+    def __init__(
+        self,
+        hidden_layers: List[int] = None,
+        mapping_size: int = 256,
+        sigma: float = 10.0,
+        **kwargs: Any
+    ):
+        self.mapping_size = mapping_size
+        self.sigma = sigma
+        super().__init__(hidden_layers=hidden_layers, **kwargs)
+
+    def build_network(self) -> nn.Module:
+        return FourierMLP(
+            hidden_dims=self.hidden_layers,
+            mapping_size=self.mapping_size,
+            sigma=self.sigma,
+            activation=self.activation
+        )
+
+
+class TwoNetworkPINN(BasePINN):
+    """
+    PINN with separate networks for n_e and phi.
+
+    Allows different architectures/capacities for each output.
+    """
+
+    def __init__(
+        self,
+        ne_layers: List[int] = None,
+        phi_layers: List[int] = None,
+        num_ffm_frequencies: int = 2,
+        use_exp_ne: bool = True,
+        use_tanh_phi: bool = False,
+        **kwargs: Any
+    ):
+        self.ne_layers = ne_layers
+        self.phi_layers = phi_layers
+        self.num_ffm_frequencies = num_ffm_frequencies
+        self.use_exp_ne = use_exp_ne
+        self.use_tanh_phi = use_tanh_phi
         super().__init__(**kwargs)
-        self.save_hyperparameters()
-        
-        self.hidden_dims = hidden_dims
-        self.use_fourier = use_fourier
-        self.fourier_scale = fourier_scale
-        self.num_fourier_features = num_fourier_features
-        self.log_space_ne = log_space_ne
-        self.activation = activation
 
-        # Build network
-        input_dim = 2  # (x, t)
-        if use_fourier:
-            self.feature_mapping = FourierFeatureMapping(input_dim, num_fourier_features, fourier_scale)
-            input_dim = num_fourier_features * 2
+    def build_network(self) -> nn.Module:
+        ne_layers = self.ne_layers if self.ne_layers else [64, 64, 64, 1]
+        phi_layers = self.phi_layers if self.phi_layers else [64, 64, 64, 1]
+        return TwoNetworkModel(
+            ne_layers=ne_layers,
+            phi_layers=phi_layers,
+            num_ffm_frequencies=self.num_ffm_frequencies,
+            use_exp_ne=self.use_exp_ne,
+            use_tanh_phi=self.use_tanh_phi
+        )
 
-        self.net = MLP(input_dim, hidden_dims, output_dim=2, activation=activation)
-        
-        console.log(f"[green]✓[/green] Initialized CCPPinn: {self.experiment_name}")
-        console.log(f"  Hidden dims: {hidden_dims}")
-        console.log(f"  Fourier features: {use_fourier} (scale={fourier_scale}, n={num_fourier_features})")
-        console.log(f"  Log-space n_e: {log_space_ne}")
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass for CCPPinn.
-        
-        Returns physical quantities (n_e, phi) by:
-        1. Normalizing inputs
-        2. Applying optional Fourier features
-        3. MLP forward pass
-        4. Scaling outputs to physical units
-        """
-        # Normalize inputs to dimensionless form
-        inputs = torch.cat([x / self.scales.x_ref, t * self.params.f], dim=1)
-        
-        if hasattr(self, 'feature_mapping'):
-            inputs = self.feature_mapping(inputs)
-        outputs = self.net(inputs)
-        
-        out1 = outputs[:, 0:1]
-        out2 = outputs[:, 1:2]
-        
-        # Dimensionless predictions
-        if self.log_space_ne:
-            n_e_hat = torch.exp(out1)
+class HybridPINN(BasePINN):
+    """
+    Hybrid PINN: Neural network for n_e, numerical solver for Poisson.
+
+    Uses NN to predict electron density, then solves Poisson equation
+    numerically for more accurate electric potential.
+    """
+
+    def __init__(
+        self,
+        hidden_layers: List[int] = None,
+        num_ffm_frequencies: int = 2,
+        solver_nx: int = 50,
+        solver_nt: int = 1000,
+        use_gpu_solver: bool = False,
+        **kwargs: Any
+    ):
+        self.num_ffm_frequencies = num_ffm_frequencies
+        self.solver_nx = solver_nx
+        self.solver_nt = solver_nt
+        self.use_gpu_solver = use_gpu_solver
+        super().__init__(hidden_layers=hidden_layers, **kwargs)
+
+        # Build Poisson solver
+        self._build_solver()
+
+        # Field cache for interpolation
+        self.field_cache = None
+
+    def _build_solver(self):
+        """Initialize the Poisson solver."""
+        t_max = 1.0 / self.params.plasma.f  # One RF period
+
+        if self.use_gpu_solver and torch.cuda.is_available():
+            self.solver = PoissonSolverGPU(
+                nx=self.solver_nx,
+                nt=self.solver_nt,
+                t_max=t_max,
+                device="cuda"
+            )
         else:
-            n_e_hat = out1
-        phi_hat = out2
-        
-        # Scale to physical units
-        n_e = n_e_hat * self.scales.n_ref
-        phi = phi_hat * self.scales.phi_ref
-        
+            self.solver = PoissonSolverCPU(
+                nx=self.solver_nx,
+                nt=self.solver_nt,
+                t_max=t_max,
+                device="cpu"
+            )
+
+    def build_network(self) -> nn.Module:
+        """Build density-only network."""
+        layers = self.hidden_layers + [1]
+        return DensityNetwork(
+            layers=layers,
+            num_ffm_frequencies=self.num_ffm_frequencies,
+            use_exp=True
+        )
+
+    def forward(self, x_t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass with hybrid NN + solver approach.
+
+        1. Predict n_e using neural network
+        2. Solve Poisson for phi using numerical solver
+        3. Interpolate phi to query points
+        """
+        n_e = self.net(x_t)
+
+        # Get phi from cache if available, otherwise return zeros
+        if self.field_cache is not None:
+            phi, _, _ = self.field_cache.get_phi(x_t)
+        else:
+            phi = torch.zeros_like(n_e)
+
         return n_e, phi
 
+    def update_poisson_cache(self):
+        """
+        Solve Poisson equation on uniform grid and update cache.
 
-class SimplePinn(BaseModel):
+        Should be called periodically during training.
+        """
+        with torch.no_grad():
+            # Evaluate n_e on uniform grid
+            x_t_uniform = self.solver.x_t_uniform.to(self.device)
+            n_e_flat = self.net(x_t_uniform)
+            n_e_grid = n_e_flat.view(self.solver.nx, self.solver.nt)
+
+            # Solve Poisson
+            if isinstance(self.solver, PoissonSolverGPU):
+                phi, dphi_dx, dphi_dxx = self.solver.solve(n_e_grid)
+            else:
+                n_e_np = n_e_grid.cpu().numpy()
+                phi, dphi_dx, dphi_dxx = self.solver.solve(n_e_np)
+                phi = torch.from_numpy(phi).float()
+                dphi_dx = torch.from_numpy(dphi_dx).float()
+                dphi_dxx = torch.from_numpy(dphi_dxx).float()
+
+            # Update cache
+            self.field_cache = FieldCache(
+                phi=phi,
+                dphi_dx=dphi_dx,
+                dphi_dxx=dphi_dxx,
+                device=self.device
+            )
+
+
+class NonDimPINN(BasePINN):
     """
-    Simple PINN baseline without Fourier features.
-    
-    Demonstrates how to create alternative architectures.
+    PINN with explicit non-dimensionalization.
+
+    All inputs/outputs are in dimensionless form.
+    Useful for problems with widely varying scales.
     """
-    
+
     def __init__(
-            self,
-            hidden_dims: List[int] = None,
-            activation: str = 'relu',
-            **kwargs: Any
+        self,
+        hidden_layers: List[int] = None,
+        num_ffm_frequencies: int = 2,
+        **kwargs: Any
     ):
-        if hidden_dims is None:
-            hidden_dims = [32, 32]
-            
-        super().__init__(**kwargs)
-        self.save_hyperparameters()
-        
-        self.hidden_dims = hidden_dims
-        self.activation = activation
-        
-        # Simple MLP
-        self.net = MLP(input_dim=2, hidden_dims=hidden_dims, output_dim=2, activation=activation)
-        
-        console.log(f"[green]✓[/green] Initialized SimplePinn: {self.experiment_name}")
+        self.num_ffm_frequencies = num_ffm_frequencies
+        super().__init__(hidden_layers=hidden_layers, **kwargs)
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Simple forward without normalization or Fourier features."""
-        inputs = torch.cat([x, t], dim=1)
-        outputs = self.net(inputs)
-        
-        n_e = outputs[:, 0:1] * self.scales.n_ref
-        phi = outputs[:, 1:2] * self.scales.phi_ref
-        
+    def build_network(self) -> nn.Module:
+        layers = self.hidden_layers + [2]
+        return SequentialModel(
+            layers=layers,
+            num_ffm_frequencies=self.num_ffm_frequencies,
+            exact_bc=True
+        )
+
+    def forward(self, x_t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward with automatic non-dimensionalization."""
+        # Input is already normalized to [0,1] x [0,1]
+        n_e, phi = self.net(x_t)
         return n_e, phi
+
+    def to_physical(
+        self, n_e: torch.Tensor, phi: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Convert dimensionless outputs to physical units."""
+        n_e_phys = self.nondim.unscale_ne(n_e)
+        phi_phys = self.nondim.unscale_phi(phi)
+        return n_e_phys, phi_phys
+
+
+# =============================================================================
+# Model Registry
+# =============================================================================
+
+MODEL_REGISTRY: Dict[str, type] = {
+    # Hyphenated names for YAML
+    "base-pinn": BasePINN,
+    "sequential-pinn": SequentialPINN,
+    "gated-pinn": GatedPINN,
+    "modulated-pinn": ModulatedPINNModel,
+    "fourier-pinn": FourierPINN,
+    "two-network-pinn": TwoNetworkPINN,
+    "hybrid-pinn": HybridPINN,
+    "nondim-pinn": NonDimPINN,
+
+    # Aliases
+    "mlp": BasePINN,
+    "ffm": SequentialPINN,
+    "gated": GatedPINN,
+    "modulated": ModulatedPINNModel,
+    "fourier": FourierPINN,
+    "hybrid": HybridPINN,
+}
+
+
+def get_model_class(name: str) -> type:
+    """
+    Get model class by name from registry.
+
+    Args:
+        name: Model name (hyphenated form, e.g., 'sequential-pinn')
+
+    Returns:
+        Model class
+
+    Raises:
+        ValueError: If model name not found in registry
+    """
+    name_lower = name.lower().replace("_", "-")
+    if name_lower not in MODEL_REGISTRY:
+        available = ", ".join(sorted(MODEL_REGISTRY.keys()))
+        raise ValueError(f"Unknown model: {name}. Available: {available}")
+    return MODEL_REGISTRY[name_lower]
+
+
+def create_model(name: str, **kwargs: Any) -> BasePINN:
+    """
+    Create model instance by name.
+
+    Args:
+        name: Model name from registry
+        **kwargs: Model initialization arguments
+
+    Returns:
+        Initialized model instance
+    """
+    model_class = get_model_class(name)
+    return model_class(**kwargs)
+
+
+def list_models() -> List[str]:
+    """List all available model names."""
+    return sorted(set(MODEL_REGISTRY.keys()))
