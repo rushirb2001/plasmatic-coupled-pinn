@@ -1,0 +1,52 @@
+# Default configuration for CCP-II PINN training
+# Usage: python -m src.trainer fit --config configs/default.yaml
+
+# Experiment settings
+# experiment_name: null  # Auto-generated: {model}_{sampler}_lr{lr}_{timestamp}
+auto_name: true
+output_dir: ./experiments
+
+# Model configuration
+model:
+  class_path: src.model.SequentialPINN
+  init_args:
+    hidden_layers: [64, 64, 64]
+    activation: tanh
+    num_ffm_frequencies: 2
+    exact_bc: true
+    learning_rate: 1e-3
+    optimizer: adamw
+    scheduler: cosine
+    weight_decay: 0.0
+    loss_weights:
+      continuity: 1.0
+      poisson: 1.0
+      bc: 10.0
+    use_adaptive_weights: false
+    visualize_on_train_end: true
+
+# Data configuration
+data:
+  batch_size: 4096
+  num_points: 20000
+  sampler_type: uniform
+  x_range: [0.0, 1.0]
+  t_range: [0.0, 1.0]
+  val_grid_size: 100
+  num_workers: 0
+
+# Trainer configuration
+trainer:
+  max_epochs: 1000
+  accelerator: auto
+  devices: 1
+  precision: 32
+  gradient_clip_val: 1.0
+  log_every_n_steps: 10
+  check_val_every_n_epoch: 10
+  enable_progress_bar: true
+  enable_model_summary: true
+
+# Logging (WandB optional)
+use_wandb: false
+wandb_project: pinn-ccp2
