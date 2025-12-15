@@ -68,3 +68,4 @@ site/
 *.md
 !README.md
 !docs/*.md
+docs/THEORETICAL_METHODS.md
