@@ -30,6 +30,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.allow_tf32 = True
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.set_float32_matmul_precision('high')  # Use TensorCores on A100
 
 import pytorch_lightning as pl
 from pytorch_lightning.cli import LightningCLI, LightningArgumentParser
@@ -171,7 +173,7 @@ class CollocationDataModule(pl.LightningDataModule):
         if self.sampler_type == "uniform":
             sampler = UniformSampler(config)
         elif self.sampler_type == "beta":
-            sampler = BetaSampler(config, beta=self.beta_param)
+            sampler = BetaSampler(config, beta_x=self.beta_param, beta_t=self.beta_param)
         elif self.sampler_type == "grid":
             nx = int(self.num_points ** 0.5)
             nt = int(self.num_points ** 0.5)
@@ -181,8 +183,8 @@ class CollocationDataModule(pl.LightningDataModule):
         else:
             sampler = create_sampler(self.sampler_type, config)
 
-        # Generate training points
-        x_t = sampler.samples  # Returns [N, 2] tensor
+        # Generate training points and pre-load to device for faster access
+        x_t = sampler.samples.to(self.device)
         self.train_dataset = TensorDataset(x_t)
 
         # Validation: always use grid for consistent evaluation
@@ -192,17 +194,19 @@ class CollocationDataModule(pl.LightningDataModule):
             num_samples=self.val_grid_size ** 2,
         )
         val_sampler = GridSampler(val_config, nx=self.val_grid_size, nt=self.val_grid_size)
-        val_x_t = val_sampler.samples
+        val_x_t = val_sampler.samples.to(self.device)
         self.val_dataset = TensorDataset(val_x_t)
         self.test_dataset = self.val_dataset
 
     def train_dataloader(self):
+        # Data is pre-loaded to device, no need for pin_memory or workers
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=True if self.device.type == "cuda" else False,
+            num_workers=0,
+            pin_memory=False,
+            drop_last=True,  # Avoid small last batch
         )
 
     def val_dataloader(self):
@@ -210,7 +214,8 @@ class CollocationDataModule(pl.LightningDataModule):
             self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=self.num_workers,
+            num_workers=0,
+            pin_memory=False,
         )
 
     def test_dataloader(self):
@@ -218,7 +223,8 @@ class CollocationDataModule(pl.LightningDataModule):
             self.test_dataset,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=self.num_workers,
+            num_workers=0,
+            pin_memory=False,
         )
 
 

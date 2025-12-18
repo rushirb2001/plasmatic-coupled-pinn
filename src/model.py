@@ -13,6 +13,7 @@ Usage with Lightning CLI:
         hidden_layers: [64, 64, 64]
 """
 
+import gc
 import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -117,6 +118,9 @@ class BasePINN(pl.LightningModule):
         # Build the network
         self.net = self.build_network()
 
+        # Compile network for faster execution (PyTorch 2.0+)
+        self._compile_network()
+
         # Adaptive loss balancing
         if use_adaptive_weights:
             self.loss_balancer = AdaptiveLossBalancer(
@@ -152,6 +156,18 @@ class BasePINN(pl.LightningModule):
             out_dim=2,
             activation=self.activation
         )
+
+    def _compile_network(self):
+        """
+        Compile network with torch.compile for faster execution.
+
+        Note: Disabled for PINNs because torch.compile doesn't support
+        double backward (needed for computing PDE residuals with create_graph=True).
+        The fused optimizer and pre-loaded data still provide speedups.
+        """
+        # torch.compile currently incompatible with autograd.grad(create_graph=True)
+        # which is required for PINN PDE residual computation
+        pass
 
     def forward(self, x_t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -265,7 +281,7 @@ class BasePINN(pl.LightningModule):
         """Training step with PDE and BC losses."""
         x_t = batch[0] if isinstance(batch, (list, tuple)) else batch
 
-        # PDE residuals
+        # PDE residuals (autocast disabled - incompatible with higher-order grads)
         res_cont, res_pois = self.compute_pde_residuals(x_t)
         loss_cont = torch.mean(res_cont**2)
         loss_pois = torch.mean(res_pois**2)
@@ -358,17 +374,22 @@ class BasePINN(pl.LightningModule):
 
     def configure_optimizers(self):
         """Configure optimizer and learning rate scheduler."""
+        # Use fused kernels on CUDA for faster optimization
+        use_fused = torch.cuda.is_available()
+
         if self.optimizer_name == "adamw":
             optimizer = torch.optim.AdamW(
                 self.parameters(),
                 lr=self.learning_rate,
-                weight_decay=self.weight_decay
+                weight_decay=self.weight_decay,
+                fused=use_fused
             )
         elif self.optimizer_name == "adam":
             optimizer = torch.optim.Adam(
                 self.parameters(),
                 lr=self.learning_rate,
-                weight_decay=self.weight_decay
+                weight_decay=self.weight_decay,
+                fused=use_fused
             )
         elif self.optimizer_name == "sgd":
             optimizer = torch.optim.SGD(
@@ -378,7 +399,11 @@ class BasePINN(pl.LightningModule):
                 momentum=0.9
             )
         else:
-            optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+            optimizer = torch.optim.Adam(
+                self.parameters(),
+                lr=self.learning_rate,
+                fused=use_fused
+            )
 
         if self.scheduler_name == "cosine":
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -405,6 +430,15 @@ class BasePINN(pl.LightningModule):
             }
 
         return optimizer
+
+    def on_train_epoch_start(self):
+        """Disable GC during training epoch for consistent performance."""
+        gc.disable()
+
+    def on_train_epoch_end(self):
+        """Re-enable GC and collect at epoch boundary."""
+        gc.enable()
+        gc.collect()
 
     def on_train_end(self):
         """Generate visualizations at end of training."""
