@@ -709,6 +709,65 @@ class HybridPINN(BasePINN):
                 device=self.device
             )
 
+    def on_train_epoch_start(self):
+        """Update Poisson cache at start of each epoch."""
+        super().on_train_epoch_start()  # GC disable from BasePINN
+        self.update_poisson_cache()
+
+    def compute_pde_residuals(
+        self, x_t: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute only continuity residual (Poisson is hard-constrained).
+
+        Uses cached phi and its derivatives from numerical solver.
+        """
+        x_t = x_t.clone().requires_grad_(True)
+
+        n_e = self.net(x_t)
+
+        # Get cached phi derivatives
+        if self.field_cache is not None:
+            _, dphi_dx, dphi_dxx = self.field_cache.get_phi(x_t)
+        else:
+            dphi_dx = torch.zeros_like(n_e)
+            dphi_dxx = torch.zeros_like(n_e)
+
+        # Compute n_e gradients
+        ones = torch.ones_like(n_e)
+        grad_ne = torch.autograd.grad(n_e, x_t, ones, create_graph=True)[0]
+        dn_e_dx = grad_ne[:, 0:1]
+        dn_e_dt = grad_ne[:, 1:2]
+
+        # Physics coefficients
+        coeff = self.nondim.coeffs
+
+        # Electron flux using cached dphi_dx
+        Gamma_e = -coeff.alpha * dn_e_dx - coeff.beta * n_e * dphi_dx
+
+        # d(Gamma_e)/dx
+        dGamma_e_dx = torch.autograd.grad(
+            Gamma_e, x_t, ones, create_graph=True
+        )[0][:, 0:1]
+
+        # Reaction rate R(x)
+        x_norm = x_t[:, 0:1]
+        R_val = torch.zeros_like(x_norm)
+        d = self.params.domain
+        x1_norm = d.x1 / d.L
+        x2_norm = d.x2 / d.L
+        mask1 = (x_norm >= x1_norm) & (x_norm <= x2_norm)
+        mask2 = (x_norm >= 1.0 - x2_norm) & (x_norm <= 1.0 - x1_norm)
+        R_val = torch.where(mask1 | mask2, torch.ones_like(R_val), R_val)
+
+        # Continuity residual only (Poisson is exact from solver)
+        res_cont = dn_e_dt + dGamma_e_dx - R_val
+
+        # Poisson residual is zero by construction (hard-constrained)
+        res_pois = torch.zeros_like(res_cont)
+
+        return res_cont, res_pois
+
 
 class NonDimPINN(BasePINN):
     """
