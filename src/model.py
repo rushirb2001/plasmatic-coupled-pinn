@@ -81,6 +81,8 @@ class BasePINN(pl.LightningModule):
         params_path: Optional[str] = None,
         use_adaptive_weights: bool = False,
         adaptive_alpha: float = 0.9,
+        exact_bc: bool = True,
+        ic_num_points: int = 10000,
         visualize_on_train_end: bool = True,
         output_dir: str = "./experiments",
         **kwargs: Any
@@ -91,8 +93,14 @@ class BasePINN(pl.LightningModule):
         # Defaults
         if hidden_layers is None:
             hidden_layers = [64, 64, 64]
+
+        # Ensure loss_weights has all required keys (merge with defaults)
+        default_loss_weights = {"continuity": 1.0, "poisson": 1.0, "bc": 10.0, "ic": 1.0}
         if loss_weights is None:
-            loss_weights = {"continuity": 1.0, "poisson": 1.0, "bc": 10.0}
+            loss_weights = default_loss_weights
+        else:
+            # Merge user-provided weights with defaults (user values take precedence)
+            loss_weights = {**default_loss_weights, **loss_weights}
 
         self.hidden_layers = hidden_layers
         self.activation = activation
@@ -103,6 +111,8 @@ class BasePINN(pl.LightningModule):
         self.weight_decay = weight_decay
         self.loss_weights = loss_weights
         self.use_adaptive_weights = use_adaptive_weights
+        self.exact_bc = exact_bc
+        self.ic_num_points = ic_num_points
         self.visualize_on_train_end = visualize_on_train_end
         self.output_dir = output_dir
 
@@ -122,10 +132,14 @@ class BasePINN(pl.LightningModule):
         self._compile_network()
 
         # Adaptive loss balancing
+        loss_names = ["continuity", "poisson", "ic"]
+        if not exact_bc:
+            loss_names.append("bc")
+
         if use_adaptive_weights:
             self.loss_balancer = AdaptiveLossBalancer(
                 alpha=adaptive_alpha,
-                loss_names=["continuity", "poisson", "bc"],
+                loss_names=loss_names,
                 initial_weights=loss_weights,
             )
         else:
@@ -139,6 +153,7 @@ class BasePINN(pl.LightningModule):
             "loss_cont": torchmetrics.MeanMetric(),
             "loss_pois": torchmetrics.MeanMetric(),
             "loss_bc": torchmetrics.MeanMetric(),
+            "loss_ic": torchmetrics.MeanMetric(),
         })
         self.val_metrics = self.train_metrics.clone(prefix="val_")
         self.test_metrics = self.train_metrics.clone(prefix="test_")
@@ -277,8 +292,73 @@ class BasePINN(pl.LightningModule):
 
         return loss_left + loss_right
 
+    def compute_ic_loss(self) -> torch.Tensor:
+        """
+        Compute initial condition loss.
+
+        IC: n_e(x, t=0) = n_io (quasi-neutrality at t=0)
+
+        Uses a fixed set of spatial points at t=0 to enforce the initial condition.
+        """
+        device = next(self.parameters()).device
+
+        # Sample spatial points at t=0
+        x = torch.linspace(0, 1, self.ic_num_points, device=device, dtype=torch.float32)
+        t0 = torch.zeros_like(x)
+        x_t0 = torch.stack([x, t0], dim=1)
+
+        # Forward pass at t=0
+        n_e_0, _ = self(x_t0)
+
+        # Ion density (normalized) - this is what n_e should equal at t=0
+        n_io = self.nondim.coeffs.gamma
+
+        # IC residual: n_e(x, t=0) - n_io = 0
+        res_ic = n_e_0 - n_io
+        loss_ic = torch.mean(res_ic**2)
+
+        return loss_ic
+
+    def pretrain_ic(
+        self,
+        num_steps: int = 500,
+        learning_rate: float = 1e-3,
+    ) -> None:
+        """
+        Pretrain the network to satisfy the initial condition.
+
+        This optional pretraining phase helps the network start with
+        a physically consistent initial state (n_e = n_io everywhere).
+
+        Args:
+            num_steps: Number of pretraining optimization steps
+            learning_rate: Learning rate for pretraining optimizer
+        """
+        device = next(self.parameters()).device
+        optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
+
+        # Generate pretraining points covering full domain at all times
+        # (we want the network to predict n_io everywhere initially)
+        n_points = self.ic_num_points
+        x = torch.rand(n_points, device=device)
+        t = torch.rand(n_points, device=device)
+        x_t = torch.stack([x, t], dim=1)
+
+        n_io = self.nondim.coeffs.gamma
+
+        self.train()
+        for step in range(num_steps):
+            optimizer.zero_grad()
+            n_e, _ = self(x_t)
+            loss = torch.mean((n_e - n_io)**2)
+            loss.backward()
+            optimizer.step()
+
+            if (step + 1) % 100 == 0:
+                print(f"IC pretrain step {step + 1}/{num_steps}, loss: {loss.item():.6f}")
+
     def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
-        """Training step with PDE and BC losses."""
+        """Training step with PDE, IC, and optional BC losses."""
         x_t = batch[0] if isinstance(batch, (list, tuple)) else batch
 
         # PDE residuals (autocast disabled - incompatible with higher-order grads)
@@ -286,25 +366,32 @@ class BasePINN(pl.LightningModule):
         loss_cont = torch.mean(res_cont**2)
         loss_pois = torch.mean(res_pois**2)
 
-        # Boundary condition loss
-        t = x_t[:, 1:2]
-        loss_bc = self.compute_boundary_loss(t)
+        # Initial condition loss (n_e = n_io at t=0)
+        loss_ic = self.compute_ic_loss()
+
+        # Boundary condition loss (only when exact_bc=False)
+        if not self.exact_bc:
+            t = x_t[:, 1:2]
+            loss_bc = self.compute_boundary_loss(t)
+        else:
+            loss_bc = torch.tensor(0.0, device=x_t.device)
 
         # Get loss weights (static or adaptive)
         if self.loss_balancer is not None:
             # Update adaptive weights
-            losses = {
-                "continuity": loss_cont,
-                "poisson": loss_pois,
-                "bc": loss_bc
-            }
+            losses = {"continuity": loss_cont, "poisson": loss_pois, "ic": loss_ic}
+            if not self.exact_bc:
+                losses["bc"] = loss_bc
+
             params = list(self.parameters())
             weights = self.loss_balancer.update(losses, params)
 
             # Log adaptive weights
             self.log("weight/continuity", weights["continuity"], on_step=False, on_epoch=True)
             self.log("weight/poisson", weights["poisson"], on_step=False, on_epoch=True)
-            self.log("weight/bc", weights["bc"], on_step=False, on_epoch=True)
+            self.log("weight/ic", weights["ic"], on_step=False, on_epoch=True)
+            if not self.exact_bc:
+                self.log("weight/bc", weights["bc"], on_step=False, on_epoch=True)
         else:
             weights = self.loss_weights
 
@@ -312,12 +399,15 @@ class BasePINN(pl.LightningModule):
         loss = (
             weights["continuity"] * loss_cont +
             weights["poisson"] * loss_pois +
-            weights["bc"] * loss_bc
+            weights["ic"] * loss_ic
         )
+        if not self.exact_bc:
+            loss = loss + weights["bc"] * loss_bc
 
         # Metrics
         self.train_metrics["loss_cont"].update(loss_cont)
         self.train_metrics["loss_pois"].update(loss_pois)
+        self.train_metrics["loss_ic"].update(loss_ic)
         self.train_metrics["loss_bc"].update(loss_bc)
 
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -326,7 +416,7 @@ class BasePINN(pl.LightningModule):
         return loss
 
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
-        """Validation step."""
+        """Validation step with PDE, IC, and optional BC losses."""
         x_t = batch[0] if isinstance(batch, (list, tuple)) else batch
 
         with torch.enable_grad():
@@ -335,17 +425,27 @@ class BasePINN(pl.LightningModule):
         loss_cont = torch.mean(res_cont**2)
         loss_pois = torch.mean(res_pois**2)
 
-        t = x_t[:, 1:2]
-        loss_bc = self.compute_boundary_loss(t)
+        # Initial condition loss
+        loss_ic = self.compute_ic_loss()
+
+        # Boundary condition loss (only when exact_bc=False)
+        if not self.exact_bc:
+            t = x_t[:, 1:2]
+            loss_bc = self.compute_boundary_loss(t)
+        else:
+            loss_bc = torch.tensor(0.0, device=x_t.device)
 
         loss = (
             self.loss_weights["continuity"] * loss_cont +
             self.loss_weights["poisson"] * loss_pois +
-            self.loss_weights["bc"] * loss_bc
+            self.loss_weights["ic"] * loss_ic
         )
+        if not self.exact_bc:
+            loss = loss + self.loss_weights["bc"] * loss_bc
 
         self.val_metrics["loss_cont"].update(loss_cont)
         self.val_metrics["loss_pois"].update(loss_pois)
+        self.val_metrics["loss_ic"].update(loss_ic)
         self.val_metrics["loss_bc"].update(loss_bc)
 
         self.log("val_loss", loss, on_epoch=True, prog_bar=True)
@@ -354,7 +454,7 @@ class BasePINN(pl.LightningModule):
         return loss
 
     def test_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
-        """Test step."""
+        """Test step with PDE and IC losses."""
         x_t = batch[0] if isinstance(batch, (list, tuple)) else batch
 
         with torch.enable_grad():
@@ -362,10 +462,15 @@ class BasePINN(pl.LightningModule):
 
         loss_cont = torch.mean(res_cont**2)
         loss_pois = torch.mean(res_pois**2)
-        loss = loss_cont + loss_pois
+
+        # Initial condition loss
+        loss_ic = self.compute_ic_loss()
+
+        loss = loss_cont + loss_pois + loss_ic
 
         self.test_metrics["loss_cont"].update(loss_cont)
         self.test_metrics["loss_pois"].update(loss_pois)
+        self.test_metrics["loss_ic"].update(loss_ic)
 
         self.log("test_loss", loss, on_epoch=True, prog_bar=True)
         self.log_dict(self.test_metrics, on_step=False, on_epoch=True)
@@ -484,8 +589,8 @@ class SequentialPINN(BasePINN):
         **kwargs: Any
     ):
         self.num_ffm_frequencies = num_ffm_frequencies
-        self.exact_bc = exact_bc
-        super().__init__(hidden_layers=hidden_layers, **kwargs)
+        # Pass exact_bc to parent class
+        super().__init__(hidden_layers=hidden_layers, exact_bc=exact_bc, **kwargs)
 
     def build_network(self) -> nn.Module:
         layers = self.hidden_layers + [2]
@@ -511,8 +616,8 @@ class GatedPINN(BasePINN):
         **kwargs: Any
     ):
         self.num_ffm_frequencies = num_ffm_frequencies
-        self.exact_bc = exact_bc
-        super().__init__(hidden_layers=hidden_layers, **kwargs)
+        # Pass exact_bc to parent class
+        super().__init__(hidden_layers=hidden_layers, exact_bc=exact_bc, **kwargs)
 
     def build_network(self) -> nn.Module:
         layers = self.hidden_layers + [2]
