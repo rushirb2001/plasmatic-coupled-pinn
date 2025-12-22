@@ -100,8 +100,14 @@ class SequentialModel(nn.Module):
         return n_e, phi
 
 
-class GatedSequentialModel(nn.Module):
-    """FFM + Gated MLP with modulation encoders."""
+class ModulatedSequentialModel(nn.Module):
+    """
+    FFM + MLP with modulation encoders (Modified MLP).
+
+    Uses two encoder pathways and interpolates based on hidden activations.
+    This is NOT a gated architecture - it's a modulation/interpolation approach
+    similar to Wang et al. (2021) Modified MLP.
+    """
 
     def __init__(
         self,
@@ -154,6 +160,88 @@ class GatedSequentialModel(nn.Module):
             phi = x_coord * torch.sin(2 * math.pi * t_coord) + x_coord * (1 - x_coord) * phi
 
         return n_e, phi
+
+
+class GatedSequentialModel(nn.Module):
+    """
+    FFM + Gated MLP with true sigmoid gating (GLU-style).
+
+    Each layer uses Gated Linear Units:
+        output = tanh(W_v @ x + b_v) * sigmoid(W_g @ x + b_g)
+
+    The sigmoid gate controls information flow, helping with:
+    - Gradient flow through deep networks
+    - Selective activation for multi-scale physics
+    - Better handling of coupled PDE dynamics
+
+    For the coupled continuity-Poisson system, this architecture allows
+    the network to learn which features are relevant for each output.
+    """
+
+    def __init__(
+        self,
+        layers: List[int] = None,
+        num_ffm_frequencies: int = 2,
+        exact_bc: bool = True
+    ):
+        super().__init__()
+        if layers is None:
+            layers = [64, 64, 64, 2]
+
+        self.ffm = FourierFeatureMapping2D(num_frequencies=num_ffm_frequencies)
+        self.exact_bc = exact_bc
+
+        input_dim = self.ffm.out_dim
+        self.num_layers = len(layers)
+
+        # Value and gate pathways for GLU
+        self.value_layers = nn.ModuleList()
+        self.gate_layers = nn.ModuleList()
+
+        prev_dim = input_dim
+        for i, h_dim in enumerate(layers[:-1]):
+            self.value_layers.append(nn.Linear(prev_dim, h_dim))
+            self.gate_layers.append(nn.Linear(prev_dim, h_dim))
+            prev_dim = h_dim
+
+        # Output layer
+        self.output_layer = nn.Linear(prev_dim, layers[-1])
+
+        # Initialize weights
+        for layer in self.value_layers:
+            nn.init.xavier_normal_(layer.weight, gain=nn.init.calculate_gain('tanh'))
+            nn.init.zeros_(layer.bias)
+        for layer in self.gate_layers:
+            nn.init.xavier_normal_(layer.weight, gain=1.0)
+            nn.init.zeros_(layer.bias)
+        nn.init.xavier_normal_(self.output_layer.weight, gain=1.0)
+        nn.init.zeros_(self.output_layer.bias)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        x_bc = x
+        x = self.ffm(x)
+
+        # GLU layers: output = tanh(value) * sigmoid(gate)
+        for value_layer, gate_layer in zip(self.value_layers, self.gate_layers):
+            value = torch.tanh(value_layer(x))
+            gate = torch.sigmoid(gate_layer(x))
+            x = value * gate
+
+        output = self.output_layer(x)
+        n_e = output[:, 0:1]
+        phi = output[:, 1:2]
+
+        if self.exact_bc:
+            x_coord = x_bc[:, 0:1]
+            t_coord = x_bc[:, 1:2]
+            n_e = x_coord * (1 - x_coord) * n_e
+            phi = x_coord * torch.sin(2 * math.pi * t_coord) + x_coord * (1 - x_coord) * phi
+
+        return n_e, phi
+
+
+# Backward compatibility alias
+GatedSequentialModelLegacy = ModulatedSequentialModel
 
 
 class ModulatedPINN(nn.Module):

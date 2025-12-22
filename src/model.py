@@ -28,6 +28,7 @@ from src.architectures import (
     MLP,
     SequentialModel,
     GatedSequentialModel,
+    ModulatedSequentialModel,
     ModulatedPINN,
     FourierMLP,
     TwoNetworkModel,
@@ -603,9 +604,15 @@ class SequentialPINN(BasePINN):
 
 class GatedPINN(BasePINN):
     """
-    PINN with FFM + Gated MLP architecture.
+    PINN with FFM + true Gated MLP (GLU-style).
 
-    Uses modulation encoders for better gradient flow.
+    Uses Gated Linear Units with sigmoid gates:
+        output = tanh(W_v @ x) * sigmoid(W_g @ x)
+
+    This architecture provides:
+    - Proper information gating for multi-scale physics
+    - Better gradient flow through deep networks
+    - Selective activation for coupled PDE dynamics
     """
 
     def __init__(
@@ -628,11 +635,40 @@ class GatedPINN(BasePINN):
         )
 
 
+class ModulatedMLPPINN(BasePINN):
+    """
+    PINN with FFM + Modulated MLP (Modified MLP).
+
+    Uses two encoder pathways with interpolation:
+        output = h * enc1 + (1 - h) * enc2
+
+    Based on Wang et al. (2021) Modified MLP architecture.
+    """
+
+    def __init__(
+        self,
+        hidden_layers: List[int] = None,
+        num_ffm_frequencies: int = 2,
+        exact_bc: bool = True,
+        **kwargs: Any
+    ):
+        self.num_ffm_frequencies = num_ffm_frequencies
+        super().__init__(hidden_layers=hidden_layers, exact_bc=exact_bc, **kwargs)
+
+    def build_network(self) -> nn.Module:
+        layers = self.hidden_layers + [2]
+        return ModulatedSequentialModel(
+            layers=layers,
+            num_ffm_frequencies=self.num_ffm_frequencies,
+            exact_bc=self.exact_bc
+        )
+
+
 class ModulatedPINNModel(BasePINN):
     """
-    PINN with modulated gating architecture.
+    PINN with lightweight modulated architecture.
 
-    Lightweight alternative to full gated model.
+    Simple modulation without FFM. Uses raw (x, t) input.
     """
 
     def __init__(
@@ -923,6 +959,7 @@ MODEL_REGISTRY: Dict[str, type] = {
     "base-pinn": BasePINN,
     "sequential-pinn": SequentialPINN,
     "gated-pinn": GatedPINN,
+    "modulated-mlp-pinn": ModulatedMLPPINN,
     "modulated-pinn": ModulatedPINNModel,
     "fourier-pinn": FourierPINN,
     "two-network-pinn": TwoNetworkPINN,
@@ -933,6 +970,7 @@ MODEL_REGISTRY: Dict[str, type] = {
     "mlp": BasePINN,
     "ffm": SequentialPINN,
     "gated": GatedPINN,
+    "modulated-mlp": ModulatedMLPPINN,
     "modulated": ModulatedPINNModel,
     "fourier": FourierPINN,
     "hybrid": HybridPINN,

@@ -4,8 +4,8 @@ Architecture components for PINN models.
 Exports:
     - Activation functions: PTanh, PExp
     - Fourier feature mappings: FourierFeatureMapping, FourierFeatureMapping2D
-    - Networks: MLP, SequentialModel, GatedSequentialModel, ModulatedPINN,
-                FourierMLP, DensityNetwork, PotentialNetwork, TwoNetworkModel
+    - Networks: MLP, SequentialModel, GatedSequentialModel, ModulatedSequentialModel,
+                ModulatedPINN, FourierMLP, DensityNetwork, PotentialNetwork, TwoNetworkModel
     - Poisson solvers: PoissonSolverCPU, PoissonSolverGPU
     - Interpolators: PoissonInterpolator, DensityInterpolator, FieldCache
 """
@@ -16,6 +16,7 @@ from .networks import (
     MLP,
     SequentialModel,
     GatedSequentialModel,
+    ModulatedSequentialModel,
     ModulatedPINN,
     FourierMLP,
     DensityNetwork,
@@ -36,6 +37,7 @@ __all__ = [
     "MLP",
     "SequentialModel",
     "GatedSequentialModel",
+    "ModulatedSequentialModel",
     "ModulatedPINN",
     "FourierMLP",
     "DensityNetwork",
