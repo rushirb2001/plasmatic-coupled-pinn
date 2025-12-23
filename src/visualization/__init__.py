@@ -4,6 +4,7 @@ Visualization module for PINN models.
 Provides utilities for:
 - Static plots: heatmaps, profiles, loss curves
 - Animations: solution evolution GIFs
+- FDM comparison: 3x2 comparison grids, error plots
 """
 
 from .plotting import (
@@ -13,6 +14,7 @@ from .plotting import (
     plot_temporal_evolution,
     plot_loss_curves,
     plot_comparison,
+    plot_comparison_heatmaps,
     plot_error_maps,
     visualize_model,
 )
@@ -22,6 +24,9 @@ from .gif_generator import (
     create_heatmap_gif,
     create_dual_heatmap_gif,
     generate_model_animation,
+    create_comparison_heatmap_gif,
+    create_comparison_profile_gif,
+    generate_comparison_animation,
 )
 
 __all__ = [
@@ -32,6 +37,7 @@ __all__ = [
     "plot_temporal_evolution",
     "plot_loss_curves",
     "plot_comparison",
+    "plot_comparison_heatmaps",
     "plot_error_maps",
     "visualize_model",
     # Animation
@@ -39,4 +45,7 @@ __all__ = [
     "create_heatmap_gif",
     "create_dual_heatmap_gif",
     "generate_model_animation",
+    "create_comparison_heatmap_gif",
+    "create_comparison_profile_gif",
+    "generate_comparison_animation",
 ]

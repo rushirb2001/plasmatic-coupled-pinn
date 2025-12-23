@@ -102,6 +102,8 @@ def plot_spatial_profiles(
     x: np.ndarray,
     t: np.ndarray,
     time_indices: Optional[List[int]] = None,
+    ref_n_e: Optional[np.ndarray] = None,
+    ref_phi: Optional[np.ndarray] = None,
     save_path: Optional[str] = None,
     figsize: Tuple[int, int] = (12, 5),
 ) -> plt.Figure:
@@ -114,6 +116,8 @@ def plot_spatial_profiles(
         x: Spatial coordinates [Nx]
         t: Time coordinates [Nt]
         time_indices: Indices of times to plot
+        ref_n_e: Reference (FDM) electron density [Nx, Nt] (optional)
+        ref_phi: Reference (FDM) potential [Nx, Nt] (optional)
         save_path: Path to save figure
         figsize: Figure size
 
@@ -132,18 +136,29 @@ def plot_spatial_profiles(
     fig, axes = plt.subplots(1, 2, figsize=figsize)
     colors = plt.cm.viridis(np.linspace(0, 1, len(time_indices)))
 
+    has_ref = ref_n_e is not None and ref_phi is not None
+
     # n_e profiles
     for i, idx in enumerate(time_indices):
         axes[0].plot(
             x_mm, n_e[:, idx],
             color=colors[i],
-            label=f"t = {t_us[idx]:.2f} μs",
-            linewidth=1.5
+            label=f"PINN t={t_us[idx]:.2f}μs" if has_ref else f"t = {t_us[idx]:.2f} μs",
+            linewidth=1.5,
+            linestyle="-"
         )
+        if has_ref:
+            axes[0].plot(
+                x_mm, ref_n_e[:, idx],
+                color=colors[i],
+                linewidth=1.5,
+                linestyle="--",
+                alpha=0.7
+            )
     axes[0].set_xlabel("Position (mm)")
     axes[0].set_ylabel(r"$n_e$ (m$^{-3}$)")
-    axes[0].set_title("Electron Density Profiles")
-    axes[0].legend()
+    axes[0].set_title("Electron Density Profiles" + (" (solid=PINN, dashed=FDM)" if has_ref else ""))
+    axes[0].legend(fontsize=8)
     axes[0].grid(True, alpha=0.3)
 
     # phi profiles
@@ -151,13 +166,22 @@ def plot_spatial_profiles(
         axes[1].plot(
             x_mm, phi[:, idx],
             color=colors[i],
-            label=f"t = {t_us[idx]:.2f} μs",
-            linewidth=1.5
+            label=f"PINN t={t_us[idx]:.2f}μs" if has_ref else f"t = {t_us[idx]:.2f} μs",
+            linewidth=1.5,
+            linestyle="-"
         )
+        if has_ref:
+            axes[1].plot(
+                x_mm, ref_phi[:, idx],
+                color=colors[i],
+                linewidth=1.5,
+                linestyle="--",
+                alpha=0.7
+            )
     axes[1].set_xlabel("Position (mm)")
     axes[1].set_ylabel(r"$\phi$ (V)")
-    axes[1].set_title("Electric Potential Profiles")
-    axes[1].legend()
+    axes[1].set_title("Electric Potential Profiles" + (" (solid=PINN, dashed=FDM)" if has_ref else ""))
+    axes[1].legend(fontsize=8)
     axes[1].grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -175,6 +199,8 @@ def plot_temporal_evolution(
     x: np.ndarray,
     t: np.ndarray,
     position_indices: Optional[List[int]] = None,
+    ref_n_e: Optional[np.ndarray] = None,
+    ref_phi: Optional[np.ndarray] = None,
     save_path: Optional[str] = None,
     figsize: Tuple[int, int] = (12, 5),
 ) -> plt.Figure:
@@ -187,6 +213,8 @@ def plot_temporal_evolution(
         x: Spatial coordinates [Nx]
         t: Time coordinates [Nt]
         position_indices: Indices of positions to plot
+        ref_n_e: Reference (FDM) electron density [Nx, Nt] (optional)
+        ref_phi: Reference (FDM) potential [Nx, Nt] (optional)
         save_path: Path to save figure
         figsize: Figure size
 
@@ -205,18 +233,29 @@ def plot_temporal_evolution(
     fig, axes = plt.subplots(1, 2, figsize=figsize)
     colors = plt.cm.plasma(np.linspace(0, 1, len(position_indices)))
 
+    has_ref = ref_n_e is not None and ref_phi is not None
+
     # n_e evolution
     for i, idx in enumerate(position_indices):
         axes[0].plot(
             t_us, n_e[idx, :],
             color=colors[i],
-            label=f"x = {x_mm[idx]:.1f} mm",
-            linewidth=1.5
+            label=f"PINN x={x_mm[idx]:.1f}mm" if has_ref else f"x = {x_mm[idx]:.1f} mm",
+            linewidth=1.5,
+            linestyle="-"
         )
+        if has_ref:
+            axes[0].plot(
+                t_us, ref_n_e[idx, :],
+                color=colors[i],
+                linewidth=1.5,
+                linestyle="--",
+                alpha=0.7
+            )
     axes[0].set_xlabel("Time (μs)")
     axes[0].set_ylabel(r"$n_e$ (m$^{-3}$)")
-    axes[0].set_title("Electron Density Evolution")
-    axes[0].legend()
+    axes[0].set_title("Electron Density Evolution" + (" (solid=PINN, dashed=FDM)" if has_ref else ""))
+    axes[0].legend(fontsize=8)
     axes[0].grid(True, alpha=0.3)
 
     # phi evolution
@@ -224,13 +263,22 @@ def plot_temporal_evolution(
         axes[1].plot(
             t_us, phi[idx, :],
             color=colors[i],
-            label=f"x = {x_mm[idx]:.1f} mm",
-            linewidth=1.5
+            label=f"PINN x={x_mm[idx]:.1f}mm" if has_ref else f"x = {x_mm[idx]:.1f} mm",
+            linewidth=1.5,
+            linestyle="-"
         )
+        if has_ref:
+            axes[1].plot(
+                t_us, ref_phi[idx, :],
+                color=colors[i],
+                linewidth=1.5,
+                linestyle="--",
+                alpha=0.7
+            )
     axes[1].set_xlabel("Time (μs)")
     axes[1].set_ylabel(r"$\phi$ (V)")
-    axes[1].set_title("Electric Potential Evolution")
-    axes[1].legend()
+    axes[1].set_title("Electric Potential Evolution" + (" (solid=PINN, dashed=FDM)" if has_ref else ""))
+    axes[1].legend(fontsize=8)
     axes[1].grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -277,6 +325,121 @@ def plot_loss_curves(
         ax.set_yscale("log")
 
     plt.tight_layout()
+
+    if save_path:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path)
+
+    return fig
+
+
+def plot_comparison_heatmaps(
+    pred_n_e: np.ndarray,
+    pred_phi: np.ndarray,
+    ref_n_e: np.ndarray,
+    ref_phi: np.ndarray,
+    x: np.ndarray,
+    t: np.ndarray,
+    save_path: Optional[str] = None,
+    figsize: Tuple[int, int] = (14, 12),
+) -> plt.Figure:
+    """
+    Plot 3x2 grid comparing PINN predictions with FDM reference.
+
+    Layout:
+        Row 1: Reconstructed n_e | Reconstructed phi
+        Row 2: FDM n_e          | FDM phi
+        Row 3: Error n_e        | Error phi
+
+    Args:
+        pred_n_e: Predicted electron density [Nx, Nt]
+        pred_phi: Predicted potential [Nx, Nt]
+        ref_n_e: Reference electron density [Nx, Nt]
+        ref_phi: Reference potential [Nx, Nt]
+        x: Spatial coordinates [Nx]
+        t: Time coordinates [Nt]
+        save_path: Path to save figure
+        figsize: Figure size
+
+    Returns:
+        Matplotlib figure
+    """
+    setup_matplotlib()
+
+    x_mm = x * 1e3
+    t_us = t * 1e6
+    extent = [t_us[0], t_us[-1], x_mm[0], x_mm[-1]]
+
+    # Compute error maps
+    eps = 1e-10
+    err_n_e = np.abs(pred_n_e - ref_n_e) / (np.abs(ref_n_e).max() + eps)
+    err_phi = np.abs(pred_phi - ref_phi) / (np.abs(ref_phi).max() + eps)
+
+    # Get colormap limits for consistent coloring
+    n_e_vmin = min(pred_n_e.min(), ref_n_e.min())
+    n_e_vmax = max(pred_n_e.max(), ref_n_e.max())
+    phi_vmin = min(pred_phi.min(), ref_phi.min())
+    phi_vmax = max(pred_phi.max(), ref_phi.max())
+
+    fig, axes = plt.subplots(3, 2, figsize=figsize)
+
+    # Row 1: Reconstructed (PINN)
+    im1 = axes[0, 0].imshow(
+        pred_n_e, extent=extent, aspect="auto", origin="lower",
+        cmap="rainbow", vmin=n_e_vmin, vmax=n_e_vmax
+    )
+    plt.colorbar(im1, ax=axes[0, 0], format="%.2e")
+    axes[0, 0].set_title(r"Reconstructed $n_e$ (m$^{-3}$)")
+    axes[0, 0].set_ylabel("Position (mm)")
+
+    im2 = axes[0, 1].imshow(
+        pred_phi, extent=extent, aspect="auto", origin="lower",
+        cmap="rainbow", vmin=phi_vmin, vmax=phi_vmax
+    )
+    plt.colorbar(im2, ax=axes[0, 1])
+    axes[0, 1].set_title(r"Reconstructed $\phi$ (V)")
+
+    # Row 2: Original (FDM)
+    im3 = axes[1, 0].imshow(
+        ref_n_e, extent=extent, aspect="auto", origin="lower",
+        cmap="rainbow", vmin=n_e_vmin, vmax=n_e_vmax
+    )
+    plt.colorbar(im3, ax=axes[1, 0], format="%.2e")
+    axes[1, 0].set_title(r"FDM $n_e$ (m$^{-3}$)")
+    axes[1, 0].set_ylabel("Position (mm)")
+
+    im4 = axes[1, 1].imshow(
+        ref_phi, extent=extent, aspect="auto", origin="lower",
+        cmap="rainbow", vmin=phi_vmin, vmax=phi_vmax
+    )
+    plt.colorbar(im4, ax=axes[1, 1])
+    axes[1, 1].set_title(r"FDM $\phi$ (V)")
+
+    # Row 3: Error
+    im5 = axes[2, 0].imshow(
+        err_n_e, extent=extent, aspect="auto", origin="lower",
+        cmap="hot"
+    )
+    plt.colorbar(im5, ax=axes[2, 0])
+    axes[2, 0].set_title(r"Relative Error $n_e$")
+    axes[2, 0].set_xlabel("Time (μs)")
+    axes[2, 0].set_ylabel("Position (mm)")
+
+    im6 = axes[2, 1].imshow(
+        err_phi, extent=extent, aspect="auto", origin="lower",
+        cmap="hot"
+    )
+    plt.colorbar(im6, ax=axes[2, 1])
+    axes[2, 1].set_title(r"Relative Error $\phi$")
+    axes[2, 1].set_xlabel("Time (μs)")
+
+    # Add L2 error text
+    l2_n_e = np.sqrt(np.mean((pred_n_e - ref_n_e)**2)) / (np.abs(ref_n_e).max() + eps)
+    l2_phi = np.sqrt(np.mean((pred_phi - ref_phi)**2)) / (np.abs(ref_phi).max() + eps)
+    fig.text(0.5, 0.01, f"Relative L2 Error: $n_e$ = {l2_n_e:.4f}, $\\phi$ = {l2_phi:.4f}",
+             ha="center", fontsize=12, fontweight="bold")
+
+    plt.tight_layout(rect=[0, 0.03, 1, 1])
 
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
