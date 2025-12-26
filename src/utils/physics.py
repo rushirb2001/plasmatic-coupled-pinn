@@ -12,6 +12,7 @@ Provides nested dataclass hierarchy for physics parameters:
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 from pathlib import Path
+import hashlib
 import yaml
 import itertools
 
@@ -289,3 +290,33 @@ class ParameterSpace:
             f"  scales: x_ref={self.scales.x_ref}, t_ref={self.scales.t_ref:.2e}, n_ref={self.scales.n_ref:.2e}\n"
             f")"
         )
+
+    def get_fdm_hash(self) -> str:
+        """
+        Generate a unique hash based on physics parameters for FDM file naming.
+
+        Returns:
+            8-character hash string identifying this parameter configuration
+        """
+        # Include all physics-relevant parameters that affect FDM solution
+        key_params = (
+            f"L={self.domain.L:.6e}_"
+            f"x1={self.domain.x1:.6e}_"
+            f"x2={self.domain.x2:.6e}_"
+            f"f={self.plasma.f:.6e}_"
+            f"V0={self.plasma.V0:.6e}_"
+            f"R0={self.plasma.R0:.6e}_"
+            f"Te={self.plasma.T_e_eV:.6e}_"
+            f"mi={self.plasma.m_i_amu:.6e}_"
+            f"nu={self.plasma.nu_m:.6e}"
+        )
+        return hashlib.md5(key_params.encode()).hexdigest()[:8]
+
+    def get_fdm_filename(self) -> str:
+        """
+        Generate FDM filename based on physics parameters.
+
+        Returns:
+            Filename like 'fdm_a1b2c3d4.npz'
+        """
+        return f"fdm_{self.get_fdm_hash()}.npz"

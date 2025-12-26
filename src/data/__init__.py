@@ -27,6 +27,8 @@ from .fdm_solver import (
     FDMSolver,
     FDMDataset,
     generate_fdm_reference,
+    get_or_generate_fdm,
+    get_fdm_for_visualization,
 )
 
 __all__ = [
@@ -52,4 +54,6 @@ __all__ = [
     "FDMSolver",
     "FDMDataset",
     "generate_fdm_reference",
+    "get_or_generate_fdm",
+    "get_fdm_for_visualization",
 ]

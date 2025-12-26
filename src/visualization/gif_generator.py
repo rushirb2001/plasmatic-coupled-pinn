@@ -14,6 +14,8 @@ import matplotlib.animation as animation
 import numpy as np
 import torch
 
+from src.data.fdm_solver import get_fdm_for_visualization
+
 
 def create_solution_gif(
     n_e: np.ndarray,
@@ -255,12 +257,21 @@ def generate_model_animation(
     t_range: Tuple[float, float] = (0.0, 1.0),
     fps: int = 30,
     device: str = "cpu",
+    fdm_dir: str = "data/fdm",
+    ref_n_e: Optional[np.ndarray] = None,
+    ref_phi: Optional[np.ndarray] = None,
+    ref_x: Optional[np.ndarray] = None,
+    ref_t: Optional[np.ndarray] = None,
 ) -> str:
     """
     Generate animation from a trained PINN model.
 
+    Automatically loads FDM reference data based on model's physics parameters
+    if available. If FDM data exists, generates a 3x2 comparison GIF.
+    Otherwise, generates a simple solution evolution GIF.
+
     Args:
-        model: Trained PINN model
+        model: Trained PINN model (should have .params attribute)
         save_path: Path to save GIF
         nx: Number of spatial points
         nt: Number of temporal points
@@ -268,6 +279,11 @@ def generate_model_animation(
         t_range: Temporal domain range
         fps: Frames per second
         device: Device for model evaluation
+        fdm_dir: Directory containing FDM reference data files
+        ref_n_e: Optional reference electron density [Nx, Nt] (overrides auto-load)
+        ref_phi: Optional reference electric potential [Nx, Nt] (overrides auto-load)
+        ref_x: Optional reference spatial coordinates [Nx] (overrides auto-load)
+        ref_t: Optional reference time coordinates [Nt] (overrides auto-load)
 
     Returns:
         Path to saved GIF
@@ -275,24 +291,48 @@ def generate_model_animation(
     model.eval()
     model.to(device)
 
-    # Create evaluation grid
-    x = torch.linspace(x_range[0], x_range[1], nx, device=device)
-    t = torch.linspace(t_range[0], t_range[1], nt, device=device)
-    X, T = torch.meshgrid(x, t, indexing="ij")
-    x_t = torch.stack([X.flatten(), T.flatten()], dim=1)
+    # Auto-load FDM reference data if model has physics params and no manual ref provided
+    if ref_n_e is None and hasattr(model, 'params'):
+        fdm_data = get_fdm_for_visualization(model.params, fdm_dir=fdm_dir)
+        if fdm_data is not None:
+            ref_n_e, ref_phi, ref_x, ref_t = fdm_data
+            print(f"Loaded FDM reference data for animation: {model.params.get_fdm_filename()}")
 
-    # Evaluate model
-    with torch.no_grad():
-        n_e, phi = model(x_t)
+    # Check if FDM reference data is available
+    has_reference = all(v is not None for v in [ref_n_e, ref_phi, ref_x, ref_t])
 
-    # Reshape to grid and convert to numpy
-    n_e = n_e.view(nx, nt).cpu().numpy()
-    phi = phi.view(nx, nt).cpu().numpy()
-    x = x.cpu().numpy()
-    t = t.cpu().numpy()
+    if has_reference:
+        # Use generate_comparison_animation for FDM comparison
+        return generate_comparison_animation(
+            model=model,
+            ref_n_e=ref_n_e,
+            ref_phi=ref_phi,
+            ref_x=ref_x,
+            ref_t=ref_t,
+            save_path=save_path,
+            fps=fps,
+            device=device,
+            animation_type="heatmap",
+        )
+    else:
+        # Original behavior without reference data
+        x = torch.linspace(x_range[0], x_range[1], nx, device=device)
+        t = torch.linspace(t_range[0], t_range[1], nt, device=device)
+        X, T = torch.meshgrid(x, t, indexing="ij")
+        x_t = torch.stack([X.flatten(), T.flatten()], dim=1)
 
-    # Create animation
-    return create_solution_gif(n_e, phi, x, t, save_path, fps=fps)
+        # Evaluate model
+        with torch.no_grad():
+            n_e, phi = model(x_t)
+
+        # Reshape to grid and convert to numpy
+        n_e = n_e.view(nx, nt).cpu().numpy()
+        phi = phi.view(nx, nt).cpu().numpy()
+        x = x.cpu().numpy()
+        t = t.cpu().numpy()
+
+        # Create animation
+        return create_solution_gif(n_e, phi, x, t, save_path, fps=fps)
 
 
 def create_comparison_heatmap_gif(

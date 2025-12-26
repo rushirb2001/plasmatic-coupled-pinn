@@ -9,12 +9,14 @@ Provides functions for visualizing:
 """
 
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
 import torch
+
+from src.data.fdm_solver import get_fdm_for_visualization
 
 
 def setup_matplotlib():
@@ -583,18 +585,31 @@ def visualize_model(
     t_range: Tuple[float, float] = (0.0, 1.0),
     save_dir: Optional[str] = None,
     device: str = "cpu",
+    fdm_dir: str = "data/fdm",
+    ref_n_e: Optional[np.ndarray] = None,
+    ref_phi: Optional[np.ndarray] = None,
+    ref_x: Optional[np.ndarray] = None,
+    ref_t: Optional[np.ndarray] = None,
 ) -> Dict[str, np.ndarray]:
     """
-    Visualize a trained PINN model.
+    Visualize a trained PINN model with optional FDM comparison.
+
+    Automatically loads FDM reference data based on model's physics parameters
+    if available. Manual reference data can still be provided.
 
     Args:
-        model: Trained PINN model
+        model: Trained PINN model (should have .params attribute)
         nx: Number of spatial points
         nt: Number of temporal points
         x_range: Spatial domain range
         t_range: Temporal domain range
         save_dir: Directory to save plots
         device: Device for model evaluation
+        fdm_dir: Directory containing FDM reference data files
+        ref_n_e: Reference (FDM) electron density [Nx, Nt] (optional, overrides auto-load)
+        ref_phi: Reference (FDM) potential [Nx, Nt] (optional, overrides auto-load)
+        ref_x: Reference spatial coordinates [Nx] (optional, overrides auto-load)
+        ref_t: Reference time coordinates [Nt] (optional, overrides auto-load)
 
     Returns:
         Dictionary with n_e, phi, x, t arrays
@@ -602,9 +617,27 @@ def visualize_model(
     model.eval()
     model.to(device)
 
-    # Create evaluation grid
-    x = torch.linspace(x_range[0], x_range[1], nx, device=device)
-    t = torch.linspace(t_range[0], t_range[1], nt, device=device)
+    # Auto-load FDM reference data if model has physics params and no manual ref provided
+    if ref_n_e is None and hasattr(model, 'params'):
+        fdm_data = get_fdm_for_visualization(model.params, fdm_dir=fdm_dir)
+        if fdm_data is not None:
+            ref_n_e, ref_phi, ref_x, ref_t = fdm_data
+            print(f"Loaded FDM reference data for visualization: {model.params.get_fdm_filename()}")
+
+    has_ref = ref_n_e is not None and ref_phi is not None
+
+    # Use reference grid if available, otherwise create evaluation grid
+    if has_ref and ref_x is not None and ref_t is not None:
+        # Normalize reference coordinates for model input
+        x_norm = ref_x / ref_x.max() if ref_x.max() > 0 else ref_x
+        t_norm = ref_t / ref_t.max() if ref_t.max() > 0 else ref_t
+        x = torch.tensor(x_norm, dtype=torch.float32, device=device)
+        t = torch.tensor(t_norm, dtype=torch.float32, device=device)
+        nx, nt = len(ref_x), len(ref_t)
+    else:
+        x = torch.linspace(x_range[0], x_range[1], nx, device=device)
+        t = torch.linspace(t_range[0], t_range[1], nt, device=device)
+
     X, T = torch.meshgrid(x, t, indexing="ij")
     x_t = torch.stack([X.flatten(), T.flatten()], dim=1)
 
@@ -615,25 +648,57 @@ def visualize_model(
     # Reshape to grid
     n_e = n_e.view(nx, nt).cpu().numpy()
     phi = phi.view(nx, nt).cpu().numpy()
-    x = x.cpu().numpy()
-    t = t.cpu().numpy()
+    x_np = x.cpu().numpy()
+    t_np = t.cpu().numpy()
+
+    # Scale predictions to physical units if reference is available
+    if has_ref:
+        n_e = n_e * ref_n_e.max()
+        phi = phi * ref_phi.max()
+        x_np = ref_x
+        t_np = ref_t
 
     # Create plots
     if save_dir:
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        plot_solution_heatmaps(
-            n_e, phi, x, t,
-            save_path=str(save_dir / "solution_heatmaps.png")
-        )
-        plot_spatial_profiles(
-            n_e, phi, x, t,
-            save_path=str(save_dir / "spatial_profiles.png")
-        )
-        plot_temporal_evolution(
-            n_e, phi, x, t,
-            save_path=str(save_dir / "temporal_evolution.png")
-        )
+        if has_ref:
+            # 3x2 comparison heatmaps
+            plot_comparison_heatmaps(
+                n_e, phi, ref_n_e, ref_phi, x_np, t_np,
+                save_path=str(save_dir / "comparison_heatmaps.png")
+            )
+            # Spatial profiles with FDM comparison
+            plot_spatial_profiles(
+                n_e, phi, x_np, t_np,
+                ref_n_e=ref_n_e, ref_phi=ref_phi,
+                save_path=str(save_dir / "spatial_profiles.png")
+            )
+            # Temporal evolution with FDM comparison
+            plot_temporal_evolution(
+                n_e, phi, x_np, t_np,
+                ref_n_e=ref_n_e, ref_phi=ref_phi,
+                save_path=str(save_dir / "temporal_evolution.png")
+            )
+            # Error maps
+            plot_error_maps(
+                n_e, phi, ref_n_e, ref_phi, x_np, t_np,
+                save_path=str(save_dir / "error_maps.png")
+            )
+        else:
+            # Original plots without comparison
+            plot_solution_heatmaps(
+                n_e, phi, x_np, t_np,
+                save_path=str(save_dir / "solution_heatmaps.png")
+            )
+            plot_spatial_profiles(
+                n_e, phi, x_np, t_np,
+                save_path=str(save_dir / "spatial_profiles.png")
+            )
+            plot_temporal_evolution(
+                n_e, phi, x_np, t_np,
+                save_path=str(save_dir / "temporal_evolution.png")
+            )
 
-    return {"n_e": n_e, "phi": phi, "x": x, "t": t}
+    return {"n_e": n_e, "phi": phi, "x": x_np, "t": t_np}

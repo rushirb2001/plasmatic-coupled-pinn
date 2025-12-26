@@ -338,6 +338,82 @@ def generate_fdm_reference(
     return ne, phi, t
 
 
+def get_or_generate_fdm(
+    params: ParameterSpace,
+    config: Optional[FDMConfig] = None,
+    fdm_dir: str = "data/fdm",
+    force_regenerate: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Get FDM reference data for given physics parameters.
+
+    If data already exists for these parameters, loads it.
+    Otherwise, generates and saves it.
+
+    Args:
+        params: Physics parameters
+        config: FDM solver configuration (uses defaults if None)
+        fdm_dir: Directory to store FDM data files
+        force_regenerate: If True, regenerate even if file exists
+
+    Returns:
+        Tuple of (ne, phi, t, x) arrays where:
+            - ne: Electron density (nt, nx)
+            - phi: Electric potential (nt, nx)
+            - t: Time array (nt,)
+            - x: Spatial array (nx,)
+    """
+    fdm_dir = Path(fdm_dir)
+    fdm_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate unique filename based on physics parameters
+    fdm_path = fdm_dir / params.get_fdm_filename()
+
+    if fdm_path.exists() and not force_regenerate:
+        print(f"Loading existing FDM data from {fdm_path}")
+        return FDMSolver.load(str(fdm_path))
+
+    # Generate FDM data
+    print(f"Generating FDM reference data for parameters: {params.get_fdm_hash()}")
+    config = config or FDMConfig()
+    solver = FDMSolver(params, config)
+    ne, phi, t = solver.solve()
+
+    # Save for future use
+    solver.save(str(fdm_path), ne, phi, t)
+
+    return ne, phi, t, solver.x
+
+
+def get_fdm_for_visualization(
+    params: ParameterSpace,
+    fdm_dir: str = "data/fdm",
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """
+    Get FDM data for visualization, transposed to [Nx, Nt] format.
+
+    Only loads existing data - does not generate if missing.
+
+    Args:
+        params: Physics parameters
+        fdm_dir: Directory containing FDM data files
+
+    Returns:
+        Tuple of (ref_n_e, ref_phi, ref_x, ref_t) with arrays transposed for
+        visualization [Nx, Nt], or None if data doesn't exist
+    """
+    fdm_dir = Path(fdm_dir)
+    fdm_path = fdm_dir / params.get_fdm_filename()
+
+    if not fdm_path.exists():
+        return None
+
+    ne, phi, t, x = FDMSolver.load(str(fdm_path))
+
+    # FDM outputs are (nt, nx), transpose to (nx, nt) for visualization
+    return ne.T, phi.T, x, t
+
+
 if __name__ == "__main__":
     # Quick test
     params = ParameterSpace()

@@ -41,6 +41,7 @@ from src.architectures import (
 from src.utils.physics import ParameterSpace, PhysicalConstants
 from src.utils.nondim import NonDimensionalizer
 from src.utils.gradients import AdaptiveLossBalancer, GradientMonitor
+from src.data.fdm_solver import get_or_generate_fdm
 from src.visualization.plotting import visualize_model
 from src.visualization.gif_generator import generate_model_animation
 
@@ -86,6 +87,7 @@ class BasePINN(pl.LightningModule):
         ic_num_points: int = 10000,
         visualize_on_train_end: bool = True,
         output_dir: str = "./experiments",
+        fdm_dir: str = "data/fdm",
         **kwargs: Any
     ):
         super().__init__()
@@ -116,12 +118,16 @@ class BasePINN(pl.LightningModule):
         self.ic_num_points = ic_num_points
         self.visualize_on_train_end = visualize_on_train_end
         self.output_dir = output_dir
+        self.fdm_dir = fdm_dir
 
         # Load physics parameters
         if params_path:
             self.params = ParameterSpace.from_yaml(params_path)
         else:
             self.params = ParameterSpace()
+
+        # Generate or load FDM reference data for this parameter configuration
+        get_or_generate_fdm(self.params, fdm_dir=fdm_dir)
 
         # Non-dimensionalization
         self.nondim = NonDimensionalizer(self.params)
@@ -561,6 +567,7 @@ class BasePINN(pl.LightningModule):
                 nt=100,
                 save_dir=str(output_path / "visualizations"),
                 device=str(self.device),
+                fdm_dir=self.fdm_dir,
             )
 
             generate_model_animation(
@@ -570,6 +577,7 @@ class BasePINN(pl.LightningModule):
                 nt=100,
                 fps=30,
                 device=str(self.device),
+                fdm_dir=self.fdm_dir,
             )
         except Exception as e:
             print(f"Visualization failed: {e}")
