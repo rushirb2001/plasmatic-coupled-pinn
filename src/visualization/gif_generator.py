@@ -3,8 +3,15 @@ Animation generation utilities for PINN visualization.
 
 Creates GIF animations of solution evolution over time.
 Supports comparison with FDM reference data.
+
+Optimizations:
+- Progress tracking with frame counts
+- Frame skipping for faster generation
+- FFmpeg writer preference (faster than Pillow)
 """
 
+import shutil
+import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -17,6 +24,43 @@ import torch
 from src.data.fdm_solver import get_fdm_for_visualization
 
 
+class ProgressCallback:
+    """Progress callback for animation saving."""
+
+    def __init__(self, total_frames: int, name: str = "Animation"):
+        self.total_frames = total_frames
+        self.name = name
+        self.current_frame = 0
+        self._last_percent = -1
+
+    def __call__(self, current_frame: int, total_frames: int):
+        """Called by animation writer for each frame."""
+        self.current_frame = current_frame
+        percent = int(100 * current_frame / total_frames)
+        # Only print on 10% increments to reduce output
+        if percent >= self._last_percent + 10:
+            self._last_percent = percent
+            print(f"  {self.name}: {percent}% ({current_frame}/{total_frames} frames)")
+            sys.stdout.flush()
+
+
+def _get_writer(fps: int, prefer_ffmpeg: bool = True):
+    """Get the best available animation writer.
+
+    FFmpeg is ~3-5x faster than Pillow for GIF generation.
+    """
+    if prefer_ffmpeg and shutil.which("ffmpeg"):
+        return animation.FFMpegWriter(fps=fps, codec="gif")
+    return animation.PillowWriter(fps=fps)
+
+
+def _compute_frame_indices(total_frames: int, skip_frames: int = 1) -> np.ndarray:
+    """Compute frame indices with optional skipping for faster generation."""
+    if skip_frames <= 1:
+        return np.arange(total_frames)
+    return np.arange(0, total_frames, skip_frames)
+
+
 def create_solution_gif(
     n_e: np.ndarray,
     phi: np.ndarray,
@@ -26,6 +70,7 @@ def create_solution_gif(
     fps: int = 30,
     dpi: int = 100,
     figsize: Tuple[int, int] = (12, 5),
+    skip_frames: int = 1,
 ) -> str:
     """
     Create animated GIF of solution evolution.
@@ -39,10 +84,18 @@ def create_solution_gif(
         fps: Frames per second
         dpi: Resolution
         figsize: Figure size
+        skip_frames: Skip every N frames for faster generation (1=no skip)
 
     Returns:
         Path to saved GIF
     """
+    # Compute frame indices with optional skipping
+    frame_indices = _compute_frame_indices(len(t), skip_frames)
+    n_frames = len(frame_indices)
+
+    print(f"Creating solution GIF: {n_frames} frames @ {fps} fps")
+    sys.stdout.flush()
+
     x_mm = x * 1e3
     t_us = t * 1e6
 
@@ -77,14 +130,15 @@ def create_solution_gif(
 
     plt.tight_layout(rect=[0, 0.05, 1, 1])
 
-    def update(frame):
-        line_ne.set_ydata(n_e[:, frame])
-        line_phi.set_ydata(phi[:, frame])
-        time_text.set_text(f"t = {t_us[frame]:.3f} μs")
+    def update(frame_idx):
+        actual_frame = frame_indices[frame_idx]
+        line_ne.set_ydata(n_e[:, actual_frame])
+        line_phi.set_ydata(phi[:, actual_frame])
+        time_text.set_text(f"t = {t_us[actual_frame]:.3f} μs")
         return line_ne, line_phi, time_text
 
     ani = animation.FuncAnimation(
-        fig, update, frames=len(t),
+        fig, update, frames=n_frames,
         interval=1000 // fps, blit=True
     )
 
@@ -92,10 +146,12 @@ def create_solution_gif(
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    writer = animation.PillowWriter(fps=fps)
-    ani.save(str(save_path), writer=writer, dpi=dpi)
+    writer = _get_writer(fps)
+    progress = ProgressCallback(n_frames, "Solution GIF")
+    ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
+    print(f"  Saved: {save_path}")
     return str(save_path)
 
 
@@ -109,6 +165,7 @@ def create_heatmap_gif(
     fps: int = 30,
     dpi: int = 100,
     figsize: Tuple[int, int] = (8, 6),
+    skip_frames: int = 1,
 ) -> str:
     """
     Create animated GIF of heatmap evolution.
@@ -125,10 +182,17 @@ def create_heatmap_gif(
         fps: Frames per second
         dpi: Resolution
         figsize: Figure size
+        skip_frames: Skip every N frames for faster generation (1=no skip)
 
     Returns:
         Path to saved GIF
     """
+    frame_indices = _compute_frame_indices(len(t), skip_frames)
+    n_frames = len(frame_indices)
+
+    print(f"Creating heatmap GIF: {n_frames} frames @ {fps} fps")
+    sys.stdout.flush()
+
     x_mm = x * 1e3
     t_us = t * 1e6
 
@@ -149,12 +213,13 @@ def create_heatmap_gif(
     ax.set_ylabel("Position (mm)")
     ax.set_title(title)
 
-    def update(frame):
-        vline.set_xdata([t_us[frame], t_us[frame]])
+    def update(frame_idx):
+        actual_frame = frame_indices[frame_idx]
+        vline.set_xdata([t_us[actual_frame], t_us[actual_frame]])
         return vline,
 
     ani = animation.FuncAnimation(
-        fig, update, frames=len(t),
+        fig, update, frames=n_frames,
         interval=1000 // fps, blit=True
     )
 
@@ -162,10 +227,12 @@ def create_heatmap_gif(
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    writer = animation.PillowWriter(fps=fps)
-    ani.save(str(save_path), writer=writer, dpi=dpi)
+    writer = _get_writer(fps)
+    progress = ProgressCallback(n_frames, "Heatmap GIF")
+    ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
+    print(f"  Saved: {save_path}")
     return str(save_path)
 
 
@@ -178,6 +245,7 @@ def create_dual_heatmap_gif(
     fps: int = 30,
     dpi: int = 100,
     figsize: Tuple[int, int] = (14, 5),
+    skip_frames: int = 1,
 ) -> str:
     """
     Create animated GIF showing both n_e and phi heatmaps.
@@ -191,10 +259,17 @@ def create_dual_heatmap_gif(
         fps: Frames per second
         dpi: Resolution
         figsize: Figure size
+        skip_frames: Skip every N frames for faster generation (1=no skip)
 
     Returns:
         Path to saved GIF
     """
+    frame_indices = _compute_frame_indices(len(t), skip_frames)
+    n_frames = len(frame_indices)
+
+    print(f"Creating dual heatmap GIF: {n_frames} frames @ {fps} fps")
+    sys.stdout.flush()
+
     x_mm = x * 1e3
     t_us = t * 1e6
     extent = [t_us[0], t_us[-1], x_mm[0], x_mm[-1]]
@@ -226,14 +301,15 @@ def create_dual_heatmap_gif(
     time_text = fig.text(0.5, 0.02, "", ha="center", fontsize=12)
     plt.tight_layout(rect=[0, 0.05, 1, 1])
 
-    def update(frame):
-        vline1.set_xdata([t_us[frame], t_us[frame]])
-        vline2.set_xdata([t_us[frame], t_us[frame]])
-        time_text.set_text(f"t = {t_us[frame]:.3f} μs")
+    def update(frame_idx):
+        actual_frame = frame_indices[frame_idx]
+        vline1.set_xdata([t_us[actual_frame], t_us[actual_frame]])
+        vline2.set_xdata([t_us[actual_frame], t_us[actual_frame]])
+        time_text.set_text(f"t = {t_us[actual_frame]:.3f} μs")
         return vline1, vline2, time_text
 
     ani = animation.FuncAnimation(
-        fig, update, frames=len(t),
+        fig, update, frames=n_frames,
         interval=1000 // fps, blit=True
     )
 
@@ -241,10 +317,12 @@ def create_dual_heatmap_gif(
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    writer = animation.PillowWriter(fps=fps)
-    ani.save(str(save_path), writer=writer, dpi=dpi)
+    writer = _get_writer(fps)
+    progress = ProgressCallback(n_frames, "Dual Heatmap GIF")
+    ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
+    print(f"  Saved: {save_path}")
     return str(save_path)
 
 
@@ -346,6 +424,7 @@ def create_comparison_heatmap_gif(
     fps: int = 30,
     dpi: int = 100,
     figsize: Tuple[int, int] = (14, 12),
+    skip_frames: int = 1,
 ) -> str:
     """
     Create animated GIF with 3x2 grid comparing PINN vs FDM.
@@ -366,10 +445,17 @@ def create_comparison_heatmap_gif(
         fps: Frames per second
         dpi: Resolution
         figsize: Figure size
+        skip_frames: Skip every N frames for faster generation (1=no skip)
 
     Returns:
         Path to saved GIF
     """
+    frame_indices = _compute_frame_indices(len(t), skip_frames)
+    n_frames = len(frame_indices)
+
+    print(f"Creating comparison heatmap GIF (3x2 grid): {n_frames} frames @ {fps} fps")
+    sys.stdout.flush()
+
     x_mm = x * 1e3
     t_us = t * 1e6
     extent = [t_us[0], t_us[-1], x_mm[0], x_mm[-1]]
@@ -446,14 +532,15 @@ def create_comparison_heatmap_gif(
     time_text = fig.text(0.5, 0.02, "", ha="center", fontsize=14, fontweight="bold")
     plt.tight_layout(rect=[0, 0.05, 1, 1])
 
-    def update(frame):
+    def update(frame_idx):
+        actual_frame = frame_indices[frame_idx]
         for vline in vlines:
-            vline.set_xdata([t_us[frame], t_us[frame]])
-        time_text.set_text(f"t = {t_us[frame]:.3f} μs")
+            vline.set_xdata([t_us[actual_frame], t_us[actual_frame]])
+        time_text.set_text(f"t = {t_us[actual_frame]:.3f} μs")
         return vlines + [time_text]
 
     ani = animation.FuncAnimation(
-        fig, update, frames=len(t),
+        fig, update, frames=n_frames,
         interval=1000 // fps, blit=True
     )
 
@@ -461,10 +548,12 @@ def create_comparison_heatmap_gif(
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    writer = animation.PillowWriter(fps=fps)
-    ani.save(str(save_path), writer=writer, dpi=dpi)
+    writer = _get_writer(fps)
+    progress = ProgressCallback(n_frames, "Comparison GIF")
+    ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
+    print(f"  Saved: {save_path}")
     return str(save_path)
 
 
@@ -479,6 +568,7 @@ def create_comparison_profile_gif(
     fps: int = 30,
     dpi: int = 100,
     figsize: Tuple[int, int] = (14, 10),
+    skip_frames: int = 1,
 ) -> str:
     """
     Create animated GIF showing spatial profiles with PINN vs FDM comparison.
@@ -498,10 +588,17 @@ def create_comparison_profile_gif(
         fps: Frames per second
         dpi: Resolution
         figsize: Figure size
+        skip_frames: Skip every N frames for faster generation (1=no skip)
 
     Returns:
         Path to saved GIF
     """
+    frame_indices = _compute_frame_indices(len(t), skip_frames)
+    n_frames = len(frame_indices)
+
+    print(f"Creating comparison profile GIF (2x2 grid): {n_frames} frames @ {fps} fps")
+    sys.stdout.flush()
+
     x_mm = x * 1e3
     t_us = t * 1e6
 
@@ -566,18 +663,19 @@ def create_comparison_profile_gif(
     time_text = fig.text(0.5, 0.02, "", ha="center", fontsize=14, fontweight="bold")
     plt.tight_layout(rect=[0, 0.05, 1, 1])
 
-    def update(frame):
-        line_pred_ne.set_ydata(pred_n_e[:, frame])
-        line_ref_ne.set_ydata(ref_n_e[:, frame])
-        line_pred_phi.set_ydata(pred_phi[:, frame])
-        line_ref_phi.set_ydata(ref_phi[:, frame])
-        line_err_ne.set_ydata(err_n_e[:, frame])
-        line_err_phi.set_ydata(err_phi[:, frame])
-        time_text.set_text(f"t = {t_us[frame]:.3f} μs")
+    def update(frame_idx):
+        actual_frame = frame_indices[frame_idx]
+        line_pred_ne.set_ydata(pred_n_e[:, actual_frame])
+        line_ref_ne.set_ydata(ref_n_e[:, actual_frame])
+        line_pred_phi.set_ydata(pred_phi[:, actual_frame])
+        line_ref_phi.set_ydata(ref_phi[:, actual_frame])
+        line_err_ne.set_ydata(err_n_e[:, actual_frame])
+        line_err_phi.set_ydata(err_phi[:, actual_frame])
+        time_text.set_text(f"t = {t_us[actual_frame]:.3f} μs")
         return line_pred_ne, line_ref_ne, line_pred_phi, line_ref_phi, line_err_ne, line_err_phi, time_text
 
     ani = animation.FuncAnimation(
-        fig, update, frames=len(t),
+        fig, update, frames=n_frames,
         interval=1000 // fps, blit=True
     )
 
@@ -585,10 +683,12 @@ def create_comparison_profile_gif(
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    writer = animation.PillowWriter(fps=fps)
-    ani.save(str(save_path), writer=writer, dpi=dpi)
+    writer = _get_writer(fps)
+    progress = ProgressCallback(n_frames, "Profile GIF")
+    ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
+    print(f"  Saved: {save_path}")
     return str(save_path)
 
 
@@ -602,6 +702,7 @@ def generate_comparison_animation(
     fps: int = 30,
     device: str = "cpu",
     animation_type: str = "heatmap",
+    skip_frames: int = 1,
 ) -> str:
     """
     Generate comparison animation from a trained PINN model vs FDM reference.
@@ -616,14 +717,21 @@ def generate_comparison_animation(
         fps: Frames per second
         device: Device for model evaluation
         animation_type: "heatmap" for 3x2 grid, "profile" for spatial profiles
+        skip_frames: Skip every N frames for faster generation (1=no skip)
 
     Returns:
         Path to saved GIF
     """
+    print(f"Generating comparison animation ({animation_type})...")
+    sys.stdout.flush()
+
     model.eval()
     model.to(device)
 
     nx, nt = len(ref_x), len(ref_t)
+
+    print(f"  Evaluating model on {nx}x{nt} grid...")
+    sys.stdout.flush()
 
     # Normalize coordinates for model input
     x_norm = ref_x / ref_x.max() if ref_x.max() > 0 else ref_x
@@ -648,14 +756,17 @@ def generate_comparison_animation(
     pred_n_e = pred_n_e * ref_n_e.max()
     pred_phi = pred_phi * ref_phi.max()
 
+    print("  Model evaluation complete. Creating animation...")
+    sys.stdout.flush()
+
     # Create animation
     if animation_type == "heatmap":
         return create_comparison_heatmap_gif(
             pred_n_e, pred_phi, ref_n_e, ref_phi,
-            ref_x, ref_t, save_path, fps=fps
+            ref_x, ref_t, save_path, fps=fps, skip_frames=skip_frames
         )
     else:
         return create_comparison_profile_gif(
             pred_n_e, pred_phi, ref_n_e, ref_phi,
-            ref_x, ref_t, save_path, fps=fps
+            ref_x, ref_t, save_path, fps=fps, skip_frames=skip_frames
         )
