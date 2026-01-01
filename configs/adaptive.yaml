@@ -20,7 +20,7 @@ model:
       poisson: 1.0
       bc: 10.0
     use_adaptive_weights: true
-    adaptive_alpha: 0.9
+    adaptive_alpha: 0.1  # Smoothing factor: 0.1 = 90% old + 10% new (slow adaptation)
     visualize_on_train_end: true
 
 data:

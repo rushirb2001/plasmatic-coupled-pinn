@@ -82,7 +82,7 @@ class BasePINN(pl.LightningModule):
         loss_weights: Dict[str, float] = None,
         params_path: Optional[str] = None,
         use_adaptive_weights: bool = False,
-        adaptive_alpha: float = 0.9,
+        adaptive_alpha: float = 0.1,
         exact_bc: bool = True,
         ic_num_points: int = 10000,
         visualize_on_train_end: bool = True,
@@ -399,6 +399,11 @@ class BasePINN(pl.LightningModule):
             self.log("weight/ic", weights["ic"], on_step=False, on_epoch=True)
             if not self.exact_bc:
                 self.log("weight/bc", weights["bc"], on_step=False, on_epoch=True)
+
+            # Log gradient norms for debugging
+            grad_norms = self.loss_balancer.get_grad_norms()
+            for name, norm in grad_norms.items():
+                self.log(f"grad_norm/{name}", norm, on_step=False, on_epoch=True)
         else:
             weights = self.loss_weights
 

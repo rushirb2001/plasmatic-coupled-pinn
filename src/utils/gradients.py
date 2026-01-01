@@ -160,27 +160,57 @@ class AdaptiveLossBalancer:
     Adaptive Loss Balancing in Deep Multitask Networks"
 
     Args:
-        alpha: Moving average coefficient (default: 0.9)
+        alpha: Smoothing coefficient for EMA (default: 0.1, meaning 90% old + 10% new)
         loss_names: Names of loss components
         initial_weights: Initial weights for each loss
+        normalize_weights: Whether to normalize weights to sum to N (default: True)
+        min_weight: Minimum weight clamp to prevent collapse (default: 0.1)
+        max_weight: Maximum weight clamp to prevent explosion (default: 10.0)
     """
 
     def __init__(
         self,
-        alpha: float = 0.9,
+        alpha: float = 0.1,
         loss_names: Optional[List[str]] = None,
         initial_weights: Optional[Dict[str, float]] = None,
+        normalize_weights: bool = True,
+        min_weight: float = 0.1,
+        max_weight: float = 10.0,
     ):
         self.alpha = alpha
+        self.normalize_weights = normalize_weights
+        self.min_weight = min_weight
+        self.max_weight = max_weight
 
         if loss_names is None:
             loss_names = ["continuity", "poisson", "bc"]
         self.loss_names = loss_names
+        self.n_losses = len(loss_names)
 
         if initial_weights is None:
             self.weights = {name: 1.0 for name in loss_names}
         else:
             self.weights = initial_weights.copy()
+
+        # Track gradient norms for logging
+        self.last_grad_norms: Dict[str, float] = {}
+
+    def _compute_grad_norm(
+        self,
+        loss: torch.Tensor,
+        params: List[torch.Tensor],
+    ) -> float:
+        """Compute proper L2 gradient norm for a loss."""
+        grads = torch.autograd.grad(
+            loss, params, retain_graph=True, create_graph=False, allow_unused=True
+        )
+
+        total_norm_sq = 0.0
+        for g in grads:
+            if g is not None:
+                total_norm_sq += g.pow(2).sum().item()
+
+        return total_norm_sq ** 0.5
 
     def update(
         self,
@@ -189,6 +219,9 @@ class AdaptiveLossBalancer:
     ) -> Dict[str, float]:
         """
         Update loss weights based on gradient magnitudes.
+
+        The algorithm equalizes gradient norms across losses by upweighting
+        losses with smaller gradients and downweighting those with larger gradients.
 
         Args:
             losses: Dictionary of loss tensors
@@ -199,38 +232,64 @@ class AdaptiveLossBalancer:
         """
         grad_norms = {}
 
-        # Compute gradient norm for each loss
+        # Compute L2 gradient norm for each loss
         for name, loss in losses.items():
             if name not in self.loss_names:
                 continue
+            grad_norms[name] = self._compute_grad_norm(loss, params)
 
-            grads = torch.autograd.grad(
-                loss, params, retain_graph=True, create_graph=False, allow_unused=True
-            )
-
-            norm = 0.0
-            for g in grads:
-                if g is not None:
-                    norm += g.abs().mean().item()
-
-            grad_norms[name] = norm
+        self.last_grad_norms = grad_norms.copy()
 
         if not grad_norms:
             return self.weights
 
-        # Find maximum gradient norm
-        max_norm = max(grad_norms.values())
+        # Compute average gradient norm (target for balancing)
+        avg_norm = sum(grad_norms.values()) / len(grad_norms)
 
-        # Update weights with moving average
+        # Avoid division by zero
+        if avg_norm < 1e-10:
+            return self.weights
+
+        # Update weights with EMA: upweight small gradients, downweight large ones
         for name in self.loss_names:
-            if name in grad_norms and grad_norms[name] > 0:
-                lambda_hat = max_norm / (grad_norms[name] + 1e-8)
-                self.weights[name] = (
-                    (1 - self.alpha) * self.weights[name] +
-                    self.alpha * lambda_hat
-                )
+            if name not in grad_norms:
+                continue
+
+            norm = grad_norms[name]
+
+            # Target weight ratio: avg_norm / norm
+            # If norm is small -> ratio is large -> upweight
+            # If norm is large -> ratio is small -> downweight
+            if norm > 1e-10:
+                target_ratio = avg_norm / norm
+            else:
+                # If gradient is near-zero, keep current weight
+                target_ratio = self.weights[name]
+
+            # Smooth update with EMA (alpha controls adaptation speed)
+            # alpha=0.1 means 90% old weight + 10% new target
+            self.weights[name] = (
+                (1 - self.alpha) * self.weights[name] +
+                self.alpha * target_ratio
+            )
+
+            # Clamp weights to prevent extreme values
+            self.weights[name] = max(self.min_weight, min(self.max_weight, self.weights[name]))
+
+        # Optionally normalize weights to sum to N (preserves relative magnitudes)
+        if self.normalize_weights:
+            weight_sum = sum(self.weights[name] for name in self.loss_names if name in self.weights)
+            if weight_sum > 0:
+                scale = self.n_losses / weight_sum
+                for name in self.loss_names:
+                    if name in self.weights:
+                        self.weights[name] *= scale
 
         return self.weights
+
+    def get_grad_norms(self) -> Dict[str, float]:
+        """Get last computed gradient norms (for logging/debugging)."""
+        return self.last_grad_norms.copy()
 
     def get_weights(self) -> Dict[str, float]:
         """Get current loss weights."""
