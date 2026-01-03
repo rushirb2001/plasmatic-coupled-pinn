@@ -5,13 +5,12 @@ Creates GIF animations of solution evolution over time.
 Supports comparison with FDM reference data.
 
 Optimizations:
-- Progress tracking with frame counts
+- tqdm progress bars for real-time feedback
 - Frame skipping for faster generation
 - FFmpeg writer preference (faster than Pillow)
 """
 
 import shutil
-import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -20,28 +19,30 @@ import matplotlib.colors as mcolors
 import matplotlib.animation as animation
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from src.data.fdm_solver import get_fdm_for_visualization
 
 
-class ProgressCallback:
-    """Progress callback for animation saving."""
+class TqdmProgressCallback:
+    """tqdm-based progress callback for animation saving."""
 
-    def __init__(self, total_frames: int, name: str = "Animation"):
-        self.total_frames = total_frames
-        self.name = name
-        self.current_frame = 0
-        self._last_percent = -1
+    def __init__(self, total_frames: int, desc: str = "Saving GIF"):
+        self.pbar = tqdm(total=total_frames, desc=desc, unit="frame",
+                         ncols=80, leave=True)
+        self._last_frame = 0
 
     def __call__(self, current_frame: int, total_frames: int):
         """Called by animation writer for each frame."""
-        self.current_frame = current_frame
-        percent = int(100 * current_frame / total_frames)
-        # Only print on 10% increments to reduce output
-        if percent >= self._last_percent + 10:
-            self._last_percent = percent
-            print(f"  {self.name}: {percent}% ({current_frame}/{total_frames} frames)")
-            sys.stdout.flush()
+        # Update by the difference since last call
+        delta = current_frame - self._last_frame
+        if delta > 0:
+            self.pbar.update(delta)
+        self._last_frame = current_frame
+
+        # Close on completion
+        if current_frame >= total_frames - 1:
+            self.pbar.close()
 
 
 def _get_writer(fps: int, prefer_ffmpeg: bool = True):
@@ -94,7 +95,6 @@ def create_solution_gif(
     n_frames = len(frame_indices)
 
     print(f"Creating solution GIF: {n_frames} frames @ {fps} fps")
-    sys.stdout.flush()
 
     x_mm = x * 1e3
     t_us = t * 1e6
@@ -147,11 +147,10 @@ def create_solution_gif(
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     writer = _get_writer(fps)
-    progress = ProgressCallback(n_frames, "Solution GIF")
+    progress = TqdmProgressCallback(n_frames, "Solution GIF")
     ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
-    print(f"  Saved: {save_path}")
     return str(save_path)
 
 
@@ -191,7 +190,6 @@ def create_heatmap_gif(
     n_frames = len(frame_indices)
 
     print(f"Creating heatmap GIF: {n_frames} frames @ {fps} fps")
-    sys.stdout.flush()
 
     x_mm = x * 1e3
     t_us = t * 1e6
@@ -228,11 +226,10 @@ def create_heatmap_gif(
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     writer = _get_writer(fps)
-    progress = ProgressCallback(n_frames, "Heatmap GIF")
+    progress = TqdmProgressCallback(n_frames, "Heatmap GIF")
     ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
-    print(f"  Saved: {save_path}")
     return str(save_path)
 
 
@@ -268,7 +265,6 @@ def create_dual_heatmap_gif(
     n_frames = len(frame_indices)
 
     print(f"Creating dual heatmap GIF: {n_frames} frames @ {fps} fps")
-    sys.stdout.flush()
 
     x_mm = x * 1e3
     t_us = t * 1e6
@@ -318,11 +314,10 @@ def create_dual_heatmap_gif(
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     writer = _get_writer(fps)
-    progress = ProgressCallback(n_frames, "Dual Heatmap GIF")
+    progress = TqdmProgressCallback(n_frames, "Dual Heatmap GIF")
     ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
-    print(f"  Saved: {save_path}")
     return str(save_path)
 
 
@@ -454,7 +449,6 @@ def create_comparison_heatmap_gif(
     n_frames = len(frame_indices)
 
     print(f"Creating comparison heatmap GIF (3x2 grid): {n_frames} frames @ {fps} fps")
-    sys.stdout.flush()
 
     x_mm = x * 1e3
     t_us = t * 1e6
@@ -549,11 +543,10 @@ def create_comparison_heatmap_gif(
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     writer = _get_writer(fps)
-    progress = ProgressCallback(n_frames, "Comparison GIF")
+    progress = TqdmProgressCallback(n_frames, "Comparison GIF")
     ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
-    print(f"  Saved: {save_path}")
     return str(save_path)
 
 
@@ -597,7 +590,6 @@ def create_comparison_profile_gif(
     n_frames = len(frame_indices)
 
     print(f"Creating comparison profile GIF (2x2 grid): {n_frames} frames @ {fps} fps")
-    sys.stdout.flush()
 
     x_mm = x * 1e3
     t_us = t * 1e6
@@ -684,11 +676,10 @@ def create_comparison_profile_gif(
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     writer = _get_writer(fps)
-    progress = ProgressCallback(n_frames, "Profile GIF")
+    progress = TqdmProgressCallback(n_frames, "Profile GIF")
     ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
-    print(f"  Saved: {save_path}")
     return str(save_path)
 
 
@@ -723,7 +714,6 @@ def generate_comparison_animation(
         Path to saved GIF
     """
     print(f"Generating comparison animation ({animation_type})...")
-    sys.stdout.flush()
 
     model.eval()
     model.to(device)
@@ -731,7 +721,6 @@ def generate_comparison_animation(
     nx, nt = len(ref_x), len(ref_t)
 
     print(f"  Evaluating model on {nx}x{nt} grid...")
-    sys.stdout.flush()
 
     # Normalize coordinates for model input
     x_norm = ref_x / ref_x.max() if ref_x.max() > 0 else ref_x
@@ -757,7 +746,6 @@ def generate_comparison_animation(
     pred_phi = pred_phi * ref_phi.max()
 
     print("  Model evaluation complete. Creating animation...")
-    sys.stdout.flush()
 
     # Create animation
     if animation_type == "heatmap":

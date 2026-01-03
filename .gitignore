@@ -60,6 +60,10 @@ logs/
 *.pt
 *.pth
 
+# Data files
+*.npz
+data/fdm/
+
 # Documentation builds
 docs/_build/
 site/
