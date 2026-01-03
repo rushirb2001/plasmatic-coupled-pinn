@@ -45,21 +45,81 @@ class TqdmProgressCallback:
             self.pbar.close()
 
 
-def _get_writer(fps: int, prefer_ffmpeg: bool = True):
+def _get_writer(fps: int, output_format: str = "mp4"):
     """Get the best available animation writer.
 
-    FFmpeg is ~3-5x faster than Pillow for GIF generation.
+    Args:
+        fps: Frames per second
+        output_format: 'mp4' (fast, recommended) or 'gif' (slow)
+
+    MP4 with H.264 is ~50-100x faster than GIF encoding.
     """
-    if prefer_ffmpeg and shutil.which("ffmpeg"):
-        return animation.FFMpegWriter(fps=fps, codec="gif")
+    if shutil.which("ffmpeg"):
+        if output_format == "gif":
+            return animation.FFMpegWriter(fps=fps, codec="gif")
+        else:
+            # H.264 is extremely fast and produces small files
+            return animation.FFMpegWriter(
+                fps=fps,
+                codec="libx264",
+                extra_args=["-pix_fmt", "yuv420p", "-crf", "23"]
+            )
     return animation.PillowWriter(fps=fps)
 
 
-def _compute_frame_indices(total_frames: int, skip_frames: int = 1) -> np.ndarray:
-    """Compute frame indices with optional skipping for faster generation."""
-    if skip_frames <= 1:
-        return np.arange(total_frames)
-    return np.arange(0, total_frames, skip_frames)
+def _convert_to_gif(mp4_path: str, gif_path: str, fps: int = 15) -> str:
+    """Convert MP4 to GIF using ffmpeg (much faster than direct GIF encoding).
+
+    Uses palette generation for better quality.
+    """
+    import subprocess
+
+    # Generate palette for better GIF quality
+    palette_cmd = [
+        "ffmpeg", "-y", "-i", mp4_path,
+        "-vf", f"fps={fps},scale=640:-1:flags=lanczos,palettegen",
+        "-t", "10",  # Sample first 10s for palette
+        "/tmp/palette.png"
+    ]
+
+    # Create GIF using palette
+    gif_cmd = [
+        "ffmpeg", "-y", "-i", mp4_path, "-i", "/tmp/palette.png",
+        "-lavfi", f"fps={fps},scale=640:-1:flags=lanczos[x];[x][1:v]paletteuse",
+        gif_path
+    ]
+
+    subprocess.run(palette_cmd, capture_output=True)
+    subprocess.run(gif_cmd, capture_output=True)
+
+    return gif_path
+
+
+def _compute_frame_indices(
+    total_frames: int,
+    skip_frames: int = 1,
+    max_frames: int = 300,
+) -> np.ndarray:
+    """Compute frame indices with automatic skipping for reasonable GIF size.
+
+    Args:
+        total_frames: Total number of frames in data
+        skip_frames: Manual skip interval (1=no skip)
+        max_frames: Maximum frames in output GIF (default 300 = 10s @ 30fps)
+
+    Returns:
+        Array of frame indices to use
+    """
+    # Auto-calculate skip to stay under max_frames
+    auto_skip = max(1, total_frames // max_frames)
+    effective_skip = max(skip_frames, auto_skip)
+
+    indices = np.arange(0, total_frames, effective_skip)
+
+    if len(indices) > max_frames:
+        indices = indices[:max_frames]
+
+    return indices
 
 
 def create_solution_gif(
@@ -90,11 +150,15 @@ def create_solution_gif(
     Returns:
         Path to saved GIF
     """
-    # Compute frame indices with optional skipping
-    frame_indices = _compute_frame_indices(len(t), skip_frames)
+    # Compute frame indices with automatic limiting
+    total_frames = len(t)
+    frame_indices = _compute_frame_indices(total_frames, skip_frames)
     n_frames = len(frame_indices)
 
-    print(f"Creating solution GIF: {n_frames} frames @ {fps} fps")
+    if n_frames < total_frames:
+        print(f"Creating solution GIF: {n_frames} frames (reduced from {total_frames}) @ {fps} fps")
+    else:
+        print(f"Creating solution GIF: {n_frames} frames @ {fps} fps")
 
     x_mm = x * 1e3
     t_us = t * 1e6
@@ -142,16 +206,23 @@ def create_solution_gif(
         interval=1000 // fps, blit=True
     )
 
-    # Save GIF
+    # Save as MP4 first (fast), then convert to GIF
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    writer = _get_writer(fps)
-    progress = TqdmProgressCallback(n_frames, "Solution GIF")
-    ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
+    mp4_path = save_path.with_suffix(".mp4")
+    writer = _get_writer(fps, output_format="mp4")
+    progress = TqdmProgressCallback(n_frames, "Rendering MP4")
+    ani.save(str(mp4_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
-    return str(save_path)
+    if save_path.suffix.lower() == ".gif":
+        print("Converting MP4 to GIF...")
+        _convert_to_gif(str(mp4_path), str(save_path), fps=min(fps, 15))
+        mp4_path.unlink()
+        return str(save_path)
+    else:
+        return str(mp4_path)
 
 
 def create_heatmap_gif(
@@ -186,10 +257,14 @@ def create_heatmap_gif(
     Returns:
         Path to saved GIF
     """
-    frame_indices = _compute_frame_indices(len(t), skip_frames)
+    total_frames = len(t)
+    frame_indices = _compute_frame_indices(total_frames, skip_frames)
     n_frames = len(frame_indices)
 
-    print(f"Creating heatmap GIF: {n_frames} frames @ {fps} fps")
+    if n_frames < total_frames:
+        print(f"Creating heatmap GIF: {n_frames} frames (reduced from {total_frames}) @ {fps} fps")
+    else:
+        print(f"Creating heatmap GIF: {n_frames} frames @ {fps} fps")
 
     x_mm = x * 1e3
     t_us = t * 1e6
@@ -221,16 +296,23 @@ def create_heatmap_gif(
         interval=1000 // fps, blit=True
     )
 
-    # Save GIF
+    # Save as MP4 first (fast), then convert to GIF
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    writer = _get_writer(fps)
-    progress = TqdmProgressCallback(n_frames, "Heatmap GIF")
-    ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
+    mp4_path = save_path.with_suffix(".mp4")
+    writer = _get_writer(fps, output_format="mp4")
+    progress = TqdmProgressCallback(n_frames, "Rendering MP4")
+    ani.save(str(mp4_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
-    return str(save_path)
+    if save_path.suffix.lower() == ".gif":
+        print("Converting MP4 to GIF...")
+        _convert_to_gif(str(mp4_path), str(save_path), fps=min(fps, 15))
+        mp4_path.unlink()
+        return str(save_path)
+    else:
+        return str(mp4_path)
 
 
 def create_dual_heatmap_gif(
@@ -261,10 +343,14 @@ def create_dual_heatmap_gif(
     Returns:
         Path to saved GIF
     """
-    frame_indices = _compute_frame_indices(len(t), skip_frames)
+    total_frames = len(t)
+    frame_indices = _compute_frame_indices(total_frames, skip_frames)
     n_frames = len(frame_indices)
 
-    print(f"Creating dual heatmap GIF: {n_frames} frames @ {fps} fps")
+    if n_frames < total_frames:
+        print(f"Creating dual heatmap GIF: {n_frames} frames (reduced from {total_frames}) @ {fps} fps")
+    else:
+        print(f"Creating dual heatmap GIF: {n_frames} frames @ {fps} fps")
 
     x_mm = x * 1e3
     t_us = t * 1e6
@@ -309,16 +395,23 @@ def create_dual_heatmap_gif(
         interval=1000 // fps, blit=True
     )
 
-    # Save GIF
+    # Save as MP4 first (fast), then convert to GIF
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    writer = _get_writer(fps)
-    progress = TqdmProgressCallback(n_frames, "Dual Heatmap GIF")
-    ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
+    mp4_path = save_path.with_suffix(".mp4")
+    writer = _get_writer(fps, output_format="mp4")
+    progress = TqdmProgressCallback(n_frames, "Rendering MP4")
+    ani.save(str(mp4_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
-    return str(save_path)
+    if save_path.suffix.lower() == ".gif":
+        print("Converting MP4 to GIF...")
+        _convert_to_gif(str(mp4_path), str(save_path), fps=min(fps, 15))
+        mp4_path.unlink()
+        return str(save_path)
+    else:
+        return str(mp4_path)
 
 
 def generate_model_animation(
@@ -445,10 +538,14 @@ def create_comparison_heatmap_gif(
     Returns:
         Path to saved GIF
     """
-    frame_indices = _compute_frame_indices(len(t), skip_frames)
+    total_frames = len(t)
+    frame_indices = _compute_frame_indices(total_frames, skip_frames)
     n_frames = len(frame_indices)
 
-    print(f"Creating comparison heatmap GIF (3x2 grid): {n_frames} frames @ {fps} fps")
+    if n_frames < total_frames:
+        print(f"Creating comparison heatmap GIF (3x2 grid): {n_frames} frames (reduced from {total_frames}) @ {fps} fps")
+    else:
+        print(f"Creating comparison heatmap GIF (3x2 grid): {n_frames} frames @ {fps} fps")
 
     x_mm = x * 1e3
     t_us = t * 1e6
@@ -538,16 +635,26 @@ def create_comparison_heatmap_gif(
         interval=1000 // fps, blit=True
     )
 
-    # Save GIF
+    # Save as MP4 first (fast), then convert to GIF
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    writer = _get_writer(fps)
-    progress = TqdmProgressCallback(n_frames, "Comparison GIF")
-    ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
+    # Use MP4 for fast encoding
+    mp4_path = save_path.with_suffix(".mp4")
+    writer = _get_writer(fps, output_format="mp4")
+    progress = TqdmProgressCallback(n_frames, "Rendering MP4")
+    ani.save(str(mp4_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
-    return str(save_path)
+    # Convert to GIF if requested
+    if save_path.suffix.lower() == ".gif":
+        print("Converting MP4 to GIF...")
+        _convert_to_gif(str(mp4_path), str(save_path), fps=min(fps, 15))
+        mp4_path.unlink()  # Remove temp MP4
+        print(f"  Saved: {save_path}")
+        return str(save_path)
+    else:
+        return str(mp4_path)
 
 
 def create_comparison_profile_gif(
@@ -586,10 +693,14 @@ def create_comparison_profile_gif(
     Returns:
         Path to saved GIF
     """
-    frame_indices = _compute_frame_indices(len(t), skip_frames)
+    total_frames = len(t)
+    frame_indices = _compute_frame_indices(total_frames, skip_frames)
     n_frames = len(frame_indices)
 
-    print(f"Creating comparison profile GIF (2x2 grid): {n_frames} frames @ {fps} fps")
+    if n_frames < total_frames:
+        print(f"Creating comparison profile GIF (2x2 grid): {n_frames} frames (reduced from {total_frames}) @ {fps} fps")
+    else:
+        print(f"Creating comparison profile GIF (2x2 grid): {n_frames} frames @ {fps} fps")
 
     x_mm = x * 1e3
     t_us = t * 1e6
@@ -671,16 +782,23 @@ def create_comparison_profile_gif(
         interval=1000 // fps, blit=True
     )
 
-    # Save GIF
+    # Save as MP4 first (fast), then convert to GIF
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    writer = _get_writer(fps)
-    progress = TqdmProgressCallback(n_frames, "Profile GIF")
-    ani.save(str(save_path), writer=writer, dpi=dpi, progress_callback=progress)
+    mp4_path = save_path.with_suffix(".mp4")
+    writer = _get_writer(fps, output_format="mp4")
+    progress = TqdmProgressCallback(n_frames, "Rendering MP4")
+    ani.save(str(mp4_path), writer=writer, dpi=dpi, progress_callback=progress)
     plt.close(fig)
 
-    return str(save_path)
+    if save_path.suffix.lower() == ".gif":
+        print("Converting MP4 to GIF...")
+        _convert_to_gif(str(mp4_path), str(save_path), fps=min(fps, 15))
+        mp4_path.unlink()
+        return str(save_path)
+    else:
+        return str(mp4_path)
 
 
 def generate_comparison_animation(
