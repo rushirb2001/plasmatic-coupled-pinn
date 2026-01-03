@@ -19,6 +19,11 @@ import torch
 from src.data.fdm_solver import get_fdm_for_visualization
 
 
+def _log(msg: str) -> None:
+    """Print a log message with prefix."""
+    print(f"[Plotting] {msg}")
+
+
 def setup_matplotlib():
     """Configure matplotlib for publication-quality plots."""
     plt.rcParams.update({
@@ -94,6 +99,7 @@ def plot_solution_heatmaps(
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path)
+        _log(f"Saved solution heatmaps to {save_path}")
 
     return fig
 
@@ -191,6 +197,7 @@ def plot_spatial_profiles(
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path)
+        _log(f"Saved spatial profiles to {save_path}")
 
     return fig
 
@@ -288,6 +295,7 @@ def plot_temporal_evolution(
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path)
+        _log(f"Saved temporal evolution to {save_path}")
 
     return fig
 
@@ -331,6 +339,7 @@ def plot_loss_curves(
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path)
+        _log(f"Saved loss curves to {save_path}")
 
     return fig
 
@@ -446,6 +455,7 @@ def plot_comparison_heatmaps(
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path)
+        _log(f"Saved comparison heatmaps to {save_path}")
 
     return fig
 
@@ -505,6 +515,7 @@ def plot_comparison(
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path)
+        _log(f"Saved comparison plot to {save_path}")
 
     return fig
 
@@ -573,6 +584,7 @@ def plot_error_maps(
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path)
+        _log(f"Saved error maps to {save_path}")
 
     return fig
 
@@ -614,17 +626,20 @@ def visualize_model(
     Returns:
         Dictionary with n_e, phi, x, t arrays
     """
+    _log(f"Starting model visualization (nx={nx}, nt={nt}, device={device})")
     model.eval()
     model.to(device)
 
     # Auto-load FDM reference data if model has physics params and no manual ref provided
     if ref_n_e is None and hasattr(model, 'params'):
+        _log("Attempting to load FDM reference data...")
         fdm_data = get_fdm_for_visualization(model.params, fdm_dir=fdm_dir)
         if fdm_data is not None:
             ref_n_e, ref_phi, ref_x, ref_t = fdm_data
-            print(f"Loaded FDM reference data for visualization: {model.params.get_fdm_filename()}")
+            _log(f"Loaded FDM reference data: {model.params.get_fdm_filename()}")
 
     has_ref = ref_n_e is not None and ref_phi is not None
+    _log(f"Reference data available: {has_ref}")
 
     # Use reference grid if available, otherwise create evaluation grid
     if has_ref and ref_x is not None and ref_t is not None:
@@ -640,10 +655,12 @@ def visualize_model(
 
     X, T = torch.meshgrid(x, t, indexing="ij")
     x_t = torch.stack([X.flatten(), T.flatten()], dim=1)
+    _log(f"Evaluating model on grid of {x_t.shape[0]} points...")
 
     # Evaluate model
     with torch.no_grad():
         n_e, phi = model(x_t)
+    _log("Model evaluation complete")
 
     # Reshape to grid
     n_e = n_e.view(nx, nt).cpu().numpy()
@@ -662,8 +679,10 @@ def visualize_model(
     if save_dir:
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
+        _log(f"Generating plots in {save_dir}")
 
         if has_ref:
+            _log("Generating comparison plots with FDM reference...")
             # 3x2 comparison heatmaps
             plot_comparison_heatmaps(
                 n_e, phi, ref_n_e, ref_phi, x_np, t_np,
@@ -687,6 +706,7 @@ def visualize_model(
                 save_path=str(save_dir / "error_maps.png")
             )
         else:
+            _log("Generating plots without FDM reference...")
             # Original plots without comparison
             plot_solution_heatmaps(
                 n_e, phi, x_np, t_np,
@@ -700,5 +720,7 @@ def visualize_model(
                 n_e, phi, x_np, t_np,
                 save_path=str(save_dir / "temporal_evolution.png")
             )
+
+        _log("Plot generation complete")
 
     return {"n_e": n_e, "phi": phi, "x": x_np, "t": t_np}
