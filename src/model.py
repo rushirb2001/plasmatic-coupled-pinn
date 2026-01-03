@@ -259,11 +259,12 @@ class BasePINN(pl.LightningModule):
         mask2 = (x_norm >= 1.0 - x2_norm) & (x_norm <= 1.0 - x1_norm)
         R_val = torch.where(mask1 | mask2, torch.ones_like(R_val), R_val)
 
-        # Ion density (normalized)
-        n_io = coeff.gamma
+        # Ion density (normalized) - computed from Boltzmann relation
+        n_io = self.params.compute_n_io()
 
-        # Continuity residual: dn_e/dt + d(Gamma_e)/dx - R = 0
-        res_cont = dn_e_dt + dGamma_e_dx - R_val
+        # Continuity residual: dn_e/dt + d(Gamma_e)/dx - gamma*R = 0
+        # gamma scales the reaction rate term
+        res_cont = dn_e_dt + dGamma_e_dx - coeff.gamma * R_val
 
         # Poisson residual: d2phi/dx2 + delta*(n_e - n_io) = 0
         res_pois = d2phi_dx2 + coeff.delta * (n_e - n_io)
@@ -318,8 +319,8 @@ class BasePINN(pl.LightningModule):
         # Forward pass at t=0
         n_e_0, _ = self(x_t0)
 
-        # Ion density (normalized) - this is what n_e should equal at t=0
-        n_io = self.nondim.coeffs.gamma
+        # Ion density (normalized) - computed from Boltzmann relation
+        n_io = self.params.compute_n_io()
 
         # IC residual: n_e(x, t=0) - n_io = 0
         res_ic = n_e_0 - n_io
@@ -352,7 +353,7 @@ class BasePINN(pl.LightningModule):
         t = torch.rand(n_points, device=device)
         x_t = torch.stack([x, t], dim=1)
 
-        n_io = self.nondim.coeffs.gamma
+        n_io = self.params.compute_n_io()
 
         self.train()
         for step in range(num_steps):

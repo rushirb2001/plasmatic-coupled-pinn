@@ -31,7 +31,7 @@ model:
       continuity: 1.0
       poisson: 1.0
       bc: 10.0
-      ic: 1.0
+      ic: 0.0  # Disabled - conflicts with exact BC enforcement
     use_adaptive_weights: true
     adaptive_alpha: 0.9
     visualize_on_train_end: true
