@@ -386,11 +386,12 @@ def plot_comparison_heatmaps(
     err_n_e = np.abs(pred_n_e - ref_n_e) / (np.abs(ref_n_e).max() + eps)
     err_phi = np.abs(pred_phi - ref_phi) / (np.abs(ref_phi).max() + eps)
 
-    # Get colormap limits for consistent coloring
-    n_e_vmin = min(pred_n_e.min(), ref_n_e.min())
-    n_e_vmax = max(pred_n_e.max(), ref_n_e.max())
-    phi_vmin = min(pred_phi.min(), ref_phi.min())
-    phi_vmax = max(pred_phi.max(), ref_phi.max())
+    # Use FDM reference for consistent colormap limits (FDM is ground truth)
+    # This ensures FDM heatmaps look identical regardless of PINN predictions
+    n_e_vmin = ref_n_e.min()
+    n_e_vmax = ref_n_e.max()
+    phi_vmin = ref_phi.min()
+    phi_vmax = ref_phi.max()
 
     fig, axes = plt.subplots(3, 2, figsize=figsize)
 
@@ -668,8 +669,15 @@ def visualize_model(
     x_np = x.cpu().numpy()
     t_np = t.cpu().numpy()
 
-    # Scale predictions to physical units if reference is available
-    if has_ref:
+    # Scale predictions to physical units using physics parameters
+    if has_ref and hasattr(model, 'params'):
+        # Use proper non-dimensionalization scales
+        n_e = n_e * model.params.scales.n_ref
+        phi = phi * model.params.scales.phi_ref
+        x_np = ref_x
+        t_np = ref_t
+    elif has_ref:
+        # Fallback: use reference max (less accurate)
         n_e = n_e * ref_n_e.max()
         phi = phi * ref_phi.max()
         x_np = ref_x
