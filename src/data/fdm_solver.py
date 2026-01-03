@@ -57,8 +57,9 @@ class FDMSolver:
         self.dt = 1.0 / (p.plasma.f * cfg.n_steps_per_cycle)
         self.n_total_steps = int(cfg.n_cycles * cfg.n_steps_per_cycle)
 
-        # Spatial grid (cell centers)
-        self.x = np.linspace(0, p.domain.L, cfg.nx)
+        # Spatial grid (matching archive: x_i = i * dx for i = 0..nx-1)
+        # Last point is at (nx-1)*dx = L - dx, NOT at L
+        self.x = np.arange(cfg.nx) * self.dx
 
     def _setup_physics(self):
         """Setup physics coefficients and initial conditions"""
