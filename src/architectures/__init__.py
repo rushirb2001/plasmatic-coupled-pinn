@@ -3,18 +3,26 @@ Architecture components for PINN models.
 
 Exports:
     - Activation functions: PTanh, PExp
-    - Fourier feature mappings: FourierFeatureMapping, FourierFeatureMapping2D
-    - Networks: MLP, SequentialModel, GatedSequentialModel, ModulatedSequentialModel,
-                ModulatedPINN, FourierMLP, DensityNetwork, PotentialNetwork, TwoNetworkModel
+    - Fourier feature mappings: FourierFeatureMapping, FourierFeatureMapping1D,
+                                FourierFeatureMapping2D, PeriodicTimeEmbedding
+    - Networks: MLP, SequentialModel, SequentialModelPeriodic, GatedSequentialModel,
+                ModulatedSequentialModel, ModulatedPINN, FourierMLP,
+                DensityNetwork, PotentialNetwork, TwoNetworkModel
     - Poisson solvers: PoissonSolverCPU, PoissonSolverGPU
     - Interpolators: PoissonInterpolator, DensityInterpolator, FieldCache
 """
 
 from .activations import PTanh, PExp
-from .fourier import FourierFeatureMapping, FourierFeatureMapping2D
+from .fourier import (
+    FourierFeatureMapping,
+    FourierFeatureMapping1D,
+    FourierFeatureMapping2D,
+    PeriodicTimeEmbedding,
+)
 from .networks import (
     MLP,
     SequentialModel,
+    SequentialModelPeriodic,
     GatedSequentialModel,
     ModulatedSequentialModel,
     ModulatedPINN,
@@ -32,10 +40,13 @@ __all__ = [
     "PExp",
     # Fourier features
     "FourierFeatureMapping",
+    "FourierFeatureMapping1D",
     "FourierFeatureMapping2D",
+    "PeriodicTimeEmbedding",
     # Networks
     "MLP",
     "SequentialModel",
+    "SequentialModelPeriodic",
     "GatedSequentialModel",
     "ModulatedSequentialModel",
     "ModulatedPINN",

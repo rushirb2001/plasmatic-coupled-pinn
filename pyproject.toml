@@ -18,8 +18,9 @@ scipy = "*"
 pyyaml = "*"
 matplotlib = "*"
 rich = "*"
-imageio = "*"
+imageio = {extras = ["ffmpeg"], version = "*"}
 jsonargparse = {extras = ["signatures"], version = "*"}
+pyDOE = "*"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "*"

@@ -11,7 +11,12 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from .fourier import FourierFeatureMapping, FourierFeatureMapping2D
+from .fourier import (
+    FourierFeatureMapping,
+    FourierFeatureMapping1D,
+    FourierFeatureMapping2D,
+    PeriodicTimeEmbedding,
+)
 from .activations import PTanh, PExp
 
 
@@ -96,6 +101,97 @@ class SequentialModel(nn.Module):
             t_coord = x_bc[:, 1:2]
             n_e = x_coord * (1 - x_coord) * n_e
             phi = x_coord * torch.sin(2 * math.pi * t_coord) + x_coord * (1 - x_coord) * phi
+
+        return n_e, phi
+
+
+class SequentialModelPeriodic(nn.Module):
+    """
+    FFM (spatial) + Periodic Time Embedding + MLP with exact BC enforcement.
+
+    This architecture guarantees exact 1-periodicity in time by encoding
+    time using only sin/cos harmonics. This is essential for RF-driven
+    plasma simulations where the solution must repeat every RF cycle.
+
+    Key differences from SequentialModel:
+    - Spatial x uses FourierFeatureMapping1D (dyadic frequencies)
+    - Time t uses PeriodicTimeEmbedding (pure harmonics, no raw t)
+    - Applies exp() to n_e for positivity before BC enforcement
+
+    Args:
+        layers: Hidden layer sizes + output size (e.g., [256, 256, 256, 2])
+        num_ffm_frequencies: Number of dyadic frequencies for spatial FFM
+        max_t_harmonic: Number of time harmonics (k=1..max_t_harmonic)
+        exact_bc: Whether to enforce exact boundary conditions
+        use_exp_ne: Whether to apply exp() to n_e for positivity
+    """
+
+    def __init__(
+        self,
+        layers: List[int] = None,
+        num_ffm_frequencies: int = 2,
+        max_t_harmonic: int = 4,
+        exact_bc: bool = True,
+        use_exp_ne: bool = True,
+    ):
+        super().__init__()
+        if layers is None:
+            layers = [256, 256, 256, 2]
+
+        self.ffm_x = FourierFeatureMapping1D(num_frequencies=num_ffm_frequencies)
+        self.t_periodic = PeriodicTimeEmbedding(max_harmonic=max_t_harmonic)
+        self.activation = nn.Tanh()
+        self.exact_bc = exact_bc
+        self.use_exp_ne = use_exp_ne
+
+        # Input dim = FFM(x) features + periodic time features
+        input_dim = self.ffm_x.out_dim + self.t_periodic.out_dim
+        layer_dims = [input_dim] + layers
+
+        self.linears = nn.ModuleList([
+            nn.Linear(layer_dims[i], layer_dims[i + 1])
+            for i in range(len(layer_dims) - 1)
+        ])
+
+        # Xavier initialization with tanh gain
+        for layer in self.linears:
+            nn.init.xavier_normal_(layer.weight, gain=nn.init.calculate_gain('tanh'))
+            nn.init.zeros_(layer.bias)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        x_raw = x[:, 0:1]
+        t_raw = x[:, 1:2]
+
+        # Encode spatial with FFM, time with periodic harmonics
+        x_feat = self.ffm_x(x_raw)
+        t_feat = self.t_periodic(t_raw)
+
+        h = torch.cat([x_feat, t_feat], dim=-1)
+
+        # MLP forward pass
+        for i in range(len(self.linears) - 1):
+            h = self.activation(self.linears[i](h))
+        output = self.linears[-1](h)
+
+        n_e_head = output[:, 0:1]
+        phi_head = output[:, 1:2]
+
+        # Apply exp for positivity (matches archive script)
+        if self.use_exp_ne:
+            n_e = torch.exp(n_e_head)
+        else:
+            n_e = n_e_head
+
+        if self.exact_bc:
+            # n_e(0,t) = n_e(1,t) = 0, enforced via x(1-x) multiplier
+            n_e = x_raw * (1 - x_raw) * n_e
+
+            # phi(0,t) = sin(2πt), phi(1,t) = 0
+            # The sin(2πt) term is 1-periodic, and phi_head depends only on
+            # periodic features, so the full phi is exactly 1-periodic
+            phi = x_raw * torch.sin(2 * math.pi * t_raw) + x_raw * (1 - x_raw) * phi_head
+        else:
+            phi = phi_head
 
         return n_e, phi
 

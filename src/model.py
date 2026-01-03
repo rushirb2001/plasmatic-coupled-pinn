@@ -27,6 +27,7 @@ import torchmetrics
 from src.architectures import (
     MLP,
     SequentialModel,
+    SequentialModelPeriodic,
     GatedSequentialModel,
     ModulatedSequentialModel,
     ModulatedPINN,
@@ -615,6 +616,58 @@ class SequentialPINN(BasePINN):
         )
 
 
+class SequentialPeriodicPINN(BasePINN):
+    """
+    PINN with FFM (spatial) + Periodic Time Embedding and exact BC enforcement.
+
+    This model guarantees exact 1-periodicity in time by encoding time
+    using only sin/cos harmonics. This matches the architecture from
+    the well-performing archive script (SequentialmodelPeriodicFFM).
+
+    Key features:
+    - Spatial x uses FourierFeatureMapping1D (dyadic frequencies)
+    - Time t uses PeriodicTimeEmbedding (pure harmonics, no raw t)
+    - Applies exp() to n_e for positivity before BC enforcement
+    - Exact boundary condition enforcement
+
+    This is ideal for RF-driven plasma simulations where the solution
+    must repeat every RF cycle.
+
+    Args:
+        hidden_layers: List of hidden layer dimensions
+        num_ffm_frequencies: Number of dyadic frequencies for spatial FFM
+        max_t_harmonic: Number of time harmonics (k=1..max_t_harmonic)
+        exact_bc: Whether to enforce exact boundary conditions
+        use_exp_ne: Whether to apply exp() to n_e for positivity
+    """
+
+    def __init__(
+        self,
+        hidden_layers: List[int] = None,
+        num_ffm_frequencies: int = 2,
+        max_t_harmonic: int = 4,
+        exact_bc: bool = True,
+        use_exp_ne: bool = True,
+        **kwargs: Any
+    ):
+        # Store these before calling super().__init__()
+        self.num_ffm_frequencies = num_ffm_frequencies
+        self.max_t_harmonic = max_t_harmonic
+        self.use_exp_ne = use_exp_ne
+        # Pass exact_bc to parent class
+        super().__init__(hidden_layers=hidden_layers, exact_bc=exact_bc, **kwargs)
+
+    def build_network(self) -> nn.Module:
+        layers = self.hidden_layers + [2]
+        return SequentialModelPeriodic(
+            layers=layers,
+            num_ffm_frequencies=self.num_ffm_frequencies,
+            max_t_harmonic=self.max_t_harmonic,
+            exact_bc=self.exact_bc,
+            use_exp_ne=self.use_exp_ne,
+        )
+
+
 class GatedPINN(BasePINN):
     """
     PINN with FFM + true Gated MLP (GLU-style).
@@ -971,6 +1024,7 @@ MODEL_REGISTRY: Dict[str, type] = {
     # Hyphenated names for YAML
     "base-pinn": BasePINN,
     "sequential-pinn": SequentialPINN,
+    "sequential-periodic-pinn": SequentialPeriodicPINN,
     "gated-pinn": GatedPINN,
     "modulated-mlp-pinn": ModulatedMLPPINN,
     "modulated-pinn": ModulatedPINNModel,
@@ -982,6 +1036,8 @@ MODEL_REGISTRY: Dict[str, type] = {
     # Aliases
     "mlp": BasePINN,
     "ffm": SequentialPINN,
+    "periodic": SequentialPeriodicPINN,
+    "periodic-ffm": SequentialPeriodicPINN,
     "gated": GatedPINN,
     "modulated-mlp": ModulatedMLPPINN,
     "modulated": ModulatedPINNModel,

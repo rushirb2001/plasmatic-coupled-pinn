@@ -2673,6 +2673,21 @@ files = [
 typing-extensions = ">=4.14.1"
 
 [[package]]
+name = "pydoe"
+version = "0.3.8"
+description = "Design of experiments for Python"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "pyDOE-0.3.8.zip", hash = "sha256:cbd6f14ae26d3c9f736013205f53ea1191add4567033c3ee77b7dd356566c4b6"},
+]
+
+[package.dependencies]
+numpy = "*"
+scipy = "*"
+
+[[package]]
 name = "pygments"
 version = "2.19.2"
 description = "Pygments is a syntax highlighting package written in Python."
@@ -3651,4 +3666,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.10"
-content-hash = "024b669a7d63cd3e20b9e00f29662d764922b40a8052720a89c2c7397d99cdb7"
+content-hash = "8f2f7caaa0d3e9c4f0c30008cd2d34a0d5905528ea0bf505ad94003fd6abb9f1"
