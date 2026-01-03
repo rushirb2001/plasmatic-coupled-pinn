@@ -65,46 +65,47 @@ def _save_frames_as_video(
     save_path: str,
     fps: int = 30,
 ) -> str:
-    """Save frames as MP4 or GIF using imageio/ffmpeg."""
+    """Save frames as MP4 first, then convert to GIF if needed.
+
+    Always renders MP4 with libx264, then uses ffmpeg palettegen for GIF.
+    """
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
+    want_gif = save_path.suffix.lower() == ".gif"
+
+    # Always save MP4 first (much faster than direct GIF)
+    mp4_path = save_path.with_suffix(".mp4")
+
+    print(f"  Saving MP4 ({len(frames)} frames)...")
 
     if HAS_IMAGEIO:
-        # Use imageio for fast saving
-        if save_path.suffix.lower() == ".gif":
-            # For GIF, reduce fps for smaller file
-            imageio.mimwrite(str(save_path), frames, fps=min(fps, 15), loop=0)
-        else:
-            # For MP4, use ffmpeg backend
-            mp4_path = save_path.with_suffix(".mp4")
-            imageio.mimwrite(str(mp4_path), frames, fps=fps, codec="libx264",
-                           output_params=["-crf", "23", "-pix_fmt", "yuv420p"])
-            if save_path.suffix.lower() == ".gif":
-                _convert_to_gif(str(mp4_path), str(save_path), fps=min(fps, 15))
-                mp4_path.unlink()
-            else:
-                return str(mp4_path)
+        # Use imageio with ffmpeg for fast MP4 encoding
+        imageio.mimwrite(
+            str(mp4_path), frames, fps=fps,
+            codec="libx264",
+            output_params=["-crf", "23", "-pix_fmt", "yuv420p"]
+        )
     else:
-        # Fallback: save as individual PNGs, then use ffmpeg
+        # Fallback: save PNGs then ffmpeg
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            for i, frame in enumerate(tqdm(frames, desc="Saving PNGs")):
+            for i, frame in enumerate(frames):
                 plt.imsave(f"{tmpdir}/frame_{i:05d}.png", frame)
-            # Use ffmpeg to create video
-            mp4_path = save_path.with_suffix(".mp4")
             subprocess.run([
                 "ffmpeg", "-y", "-framerate", str(fps),
                 "-i", f"{tmpdir}/frame_%05d.png",
                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23",
                 str(mp4_path)
             ], capture_output=True)
-            if save_path.suffix.lower() == ".gif":
-                _convert_to_gif(str(mp4_path), str(save_path), fps=min(fps, 15))
-                mp4_path.unlink()
-                return str(save_path)
-            return str(mp4_path)
 
-    return str(save_path)
+    # Convert to GIF if requested
+    if want_gif:
+        print("  Converting MP4 → GIF...")
+        _convert_to_gif(str(mp4_path), str(save_path), fps=min(fps, 15))
+        mp4_path.unlink()  # Remove temp MP4
+        return str(save_path)
+
+    return str(mp4_path)
 
 
 class TqdmProgressCallback:
@@ -594,144 +595,103 @@ def create_comparison_heatmap_gif(
     save_path: str,
     fps: int = 30,
     dpi: int = 150,
-    figsize: Tuple[float, float] = (10, 8),
+    figsize: Tuple[float, float] = (8, 6),
     skip_frames: int = 1,
 ) -> str:
     """
     Create animated GIF with 3x2 grid comparing PINN vs FDM.
 
-    Layout:
-        Row 1: Reconstructed n_e | Reconstructed phi
-        Row 2: FDM n_e          | FDM phi
-        Row 3: Error n_e        | Error phi
-
-    Args:
-        pred_n_e: Predicted electron density [Nx, Nt]
-        pred_phi: Predicted electric potential [Nx, Nt]
-        ref_n_e: Reference (FDM) electron density [Nx, Nt]
-        ref_phi: Reference (FDM) electric potential [Nx, Nt]
-        x: Spatial coordinates [Nx]
-        t: Time coordinates [Nt]
-        save_path: Path to save GIF
-        fps: Frames per second
-        dpi: Resolution
-        figsize: Figure size
-        skip_frames: Skip every N frames for faster generation (1=no skip)
-
-    Returns:
-        Path to saved GIF
+    Optimized for speed: renders MP4 first, converts to GIF.
     """
     total_frames = len(t)
     frame_indices = _compute_frame_indices(total_frames, skip_frames)
     n_frames = len(frame_indices)
 
     if n_frames < total_frames:
-        print(f"Creating comparison heatmap GIF (3x2 grid): {n_frames} frames (reduced from {total_frames}) @ {fps} fps")
+        print(f"Comparison heatmap: {n_frames} frames (from {total_frames}) @ {fps} fps")
     else:
-        print(f"Creating comparison heatmap GIF (3x2 grid): {n_frames} frames @ {fps} fps")
+        print(f"Comparison heatmap: {n_frames} frames @ {fps} fps")
 
     x_mm = x * 1e3
     t_us = t * 1e6
     extent = [t_us[0], t_us[-1], x_mm[0], x_mm[-1]]
 
-    # Compute error maps
+    # Precompute error maps and fix all vmin/vmax
     eps = 1e-10
     err_n_e = np.abs(pred_n_e - ref_n_e) / (np.abs(ref_n_e).max() + eps)
     err_phi = np.abs(pred_phi - ref_phi) / (np.abs(ref_phi).max() + eps)
 
-    # Get colormap limits for consistent coloring
-    n_e_vmin = min(pred_n_e.min(), ref_n_e.min())
-    n_e_vmax = max(pred_n_e.max(), ref_n_e.max())
-    phi_vmin = min(pred_phi.min(), ref_phi.min())
-    phi_vmax = max(pred_phi.max(), ref_phi.max())
+    n_e_vmin, n_e_vmax = min(pred_n_e.min(), ref_n_e.min()), max(pred_n_e.max(), ref_n_e.max())
+    phi_vmin, phi_vmax = min(pred_phi.min(), ref_phi.min()), max(pred_phi.max(), ref_phi.max())
+    err_n_e_vmax, err_phi_vmax = err_n_e.max(), err_phi.max()
 
+    # Create figure WITHOUT tight_layout (apply once before loop)
     fig, axes = plt.subplots(3, 2, figsize=figsize)
 
-    # Row 1: Reconstructed (PINN)
-    im_pred_ne = axes[0, 0].imshow(
-        pred_n_e, extent=extent, aspect="auto", origin="lower",
-        cmap="rainbow", vmin=n_e_vmin, vmax=n_e_vmax
-    )
-    plt.colorbar(im_pred_ne, ax=axes[0, 0], format="%.2e")
-    axes[0, 0].set_title(r"Reconstructed $n_e$ (m$^{-3}$)")
-    axes[0, 0].set_ylabel("Position (mm)")
+    # Disable autoscaling on all axes
+    for ax in axes.flatten():
+        ax.set_autoscale_on(False)
 
-    im_pred_phi = axes[0, 1].imshow(
-        pred_phi, extent=extent, aspect="auto", origin="lower",
-        cmap="rainbow", vmin=phi_vmin, vmax=phi_vmax
-    )
-    plt.colorbar(im_pred_phi, ax=axes[0, 1])
-    axes[0, 1].set_title(r"Reconstructed $\phi$ (V)")
+    # Initialize imshow with interpolation="nearest" and fixed normalization
+    # Use viridis/plasma instead of rainbow for performance
+    im_pred_ne = axes[0, 0].imshow(pred_n_e, extent=extent, aspect="auto", origin="lower",
+                                    cmap="viridis", vmin=n_e_vmin, vmax=n_e_vmax, interpolation="nearest")
+    im_pred_phi = axes[0, 1].imshow(pred_phi, extent=extent, aspect="auto", origin="lower",
+                                     cmap="plasma", vmin=phi_vmin, vmax=phi_vmax, interpolation="nearest")
+    im_ref_ne = axes[1, 0].imshow(ref_n_e, extent=extent, aspect="auto", origin="lower",
+                                   cmap="viridis", vmin=n_e_vmin, vmax=n_e_vmax, interpolation="nearest")
+    im_ref_phi = axes[1, 1].imshow(ref_phi, extent=extent, aspect="auto", origin="lower",
+                                    cmap="plasma", vmin=phi_vmin, vmax=phi_vmax, interpolation="nearest")
+    im_err_ne = axes[2, 0].imshow(err_n_e, extent=extent, aspect="auto", origin="lower",
+                                   cmap="hot", vmin=0, vmax=err_n_e_vmax, interpolation="nearest")
+    im_err_phi = axes[2, 1].imshow(err_phi, extent=extent, aspect="auto", origin="lower",
+                                    cmap="hot", vmin=0, vmax=err_phi_vmax, interpolation="nearest")
 
-    # Row 2: Original (FDM)
-    im_ref_ne = axes[1, 0].imshow(
-        ref_n_e, extent=extent, aspect="auto", origin="lower",
-        cmap="rainbow", vmin=n_e_vmin, vmax=n_e_vmax
-    )
-    plt.colorbar(im_ref_ne, ax=axes[1, 0], format="%.2e")
-    axes[1, 0].set_title(r"FDM $n_e$ (m$^{-3}$)")
-    axes[1, 0].set_ylabel("Position (mm)")
+    # Titles (set once, never touch again)
+    axes[0, 0].set_title(r"PINN $n_e$", fontsize=9)
+    axes[0, 1].set_title(r"PINN $\phi$", fontsize=9)
+    axes[1, 0].set_title(r"FDM $n_e$", fontsize=9)
+    axes[1, 1].set_title(r"FDM $\phi$", fontsize=9)
+    axes[2, 0].set_title(r"Error $n_e$", fontsize=9)
+    axes[2, 1].set_title(r"Error $\phi$", fontsize=9)
 
-    im_ref_phi = axes[1, 1].imshow(
-        ref_phi, extent=extent, aspect="auto", origin="lower",
-        cmap="rainbow", vmin=phi_vmin, vmax=phi_vmax
-    )
-    plt.colorbar(im_ref_phi, ax=axes[1, 1])
-    axes[1, 1].set_title(r"FDM $\phi$ (V)")
+    # Labels (bottom row only)
+    axes[2, 0].set_xlabel("Time (μs)", fontsize=8)
+    axes[2, 1].set_xlabel("Time (μs)", fontsize=8)
+    for ax in axes[:, 0]:
+        ax.set_ylabel("x (mm)", fontsize=8)
 
-    # Row 3: Error
-    im_err_ne = axes[2, 0].imshow(
-        err_n_e, extent=extent, aspect="auto", origin="lower",
-        cmap="hot", vmin=0, vmax=err_n_e.max()
-    )
-    plt.colorbar(im_err_ne, ax=axes[2, 0])
-    axes[2, 0].set_title(r"Relative Error $n_e$")
-    axes[2, 0].set_xlabel("Time (μs)")
-    axes[2, 0].set_ylabel("Position (mm)")
-
-    im_err_phi = axes[2, 1].imshow(
-        err_phi, extent=extent, aspect="auto", origin="lower",
-        cmap="hot", vmin=0, vmax=err_phi.max()
-    )
-    plt.colorbar(im_err_phi, ax=axes[2, 1])
-    axes[2, 1].set_title(r"Relative Error $\phi$")
-    axes[2, 1].set_xlabel("Time (μs)")
-
-    # Create vertical time indicator lines
+    # Create vertical time indicators (static lines, only update xdata)
     vlines = []
     for ax in axes.flatten():
-        vline = ax.axvline(x=t_us[0], color="white", linewidth=2, linestyle="--")
+        vline = ax.axvline(x=t_us[0], color="white", linewidth=1.5, linestyle="--")
         vlines.append(vline)
 
-    time_text = fig.text(0.5, 0.02, "", ha="center", fontsize=14, fontweight="bold")
-    plt.tight_layout(rect=[0, 0.05, 1, 1])
+    # Single text artist for time display
+    time_text = fig.text(0.5, 0.01, "", ha="center", fontsize=10)
 
+    # Apply tight_layout ONCE before rendering
+    plt.tight_layout(rect=[0, 0.03, 1, 1])
+    plt.subplots_adjust(hspace=0.25, wspace=0.15)
+
+    # Define update function (only updates line positions and text)
     def update(frame_idx):
         actual_frame = frame_indices[frame_idx]
+        t_val = t_us[actual_frame]
         for vline in vlines:
-            vline.set_xdata([t_us[actual_frame], t_us[actual_frame]])
-        time_text.set_text(f"t = {t_us[actual_frame]:.3f} μs")
-        return vlines + [time_text]
+            vline.set_xdata([t_val, t_val])
+        time_text.set_text(f"t = {t_val:.2f} μs")
 
-    # Use tqdm on frames for progress, disable internal callback
-    frames_iter = tqdm(range(n_frames), desc="Rendering", unit="frame", ncols=80)
-    ani = animation.FuncAnimation(
-        fig, update, frames=frames_iter,
-        interval=1000 // fps, blit=True
-    )
-
-    # Save
-    save_path = Path(save_path)
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Use pillow for GIF (simpler), reduce DPI for speed
-    effective_dpi = min(dpi, 100)
-    ani.save(str(save_path), writer="pillow", fps=fps, dpi=effective_dpi,
-             progress_callback=lambda i, n: None)
+    # Render frames using fast method
+    frames = _render_frames_fast(fig, update, np.arange(n_frames), desc="Rendering frames")
     plt.close(fig)
 
-    print(f"  Saved: {save_path}")
-    return str(save_path)
+    # Save using imageio (MP4 first, then convert to GIF if needed)
+    save_path = Path(save_path)
+    result = _save_frames_as_video(frames, str(save_path), fps=fps)
+
+    print(f"  Saved: {result}")
+    return result
 
 
 def create_comparison_profile_gif(
