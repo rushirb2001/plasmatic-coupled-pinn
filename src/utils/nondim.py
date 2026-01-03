@@ -19,15 +19,17 @@ class DimensionlessCoefficients:
     """
     Computed dimensionless coefficients for the CCP-II PDE system.
 
-    These appear in the non-dimensionalized PDEs:
+    These appear in the non-dimensionalized PDEs (matching archive formula):
 
-    Continuity: dn'/dt' + alpha * d2n'/dx'2 + beta * (n' * d2phi'/dx'2 + dphi'/dx' * dn'/dx') = gamma * R'
+    Continuity: dn'/dt' + alpha * d2n'/dx'2 + beta * (n' * d2phi'/dx'2 + dphi'/dx' * dn'/dx') - gamma * R = 0
 
-    Poisson: d2phi'/dx'2 + delta * (n' - n'_io) = 0
+    Poisson: d2phi'/dx'2 - delta * (n' - n'_io) = 0
+
+    Note: alpha is NEGATIVE for correct diffusion physics.
     """
-    alpha: float   # Diffusion scale: D * t_ref / x_ref^2
+    alpha: float   # Diffusion scale: -D * t_ref / x_ref^2 (NEGATIVE)
     beta: float    # Drift scale: mu * phi_ref * t_ref / x_ref^2
-    gamma: float   # Reaction scale: t_ref * R0 / n_ref
+    gamma: float   # Reaction scale: t_ref / n_ref (R_0 applied separately in residual)
     delta: float   # Poisson scale: e * n_ref * x_ref^2 / (epsilon_0 * phi_ref)
 
     def to_dict(self) -> dict:
@@ -63,29 +65,27 @@ class NonDimensionalizer:
         self._compute_coefficients()
 
     def _compute_coefficients(self):
-        """Compute dimensionless PDE coefficients"""
+        """Compute dimensionless PDE coefficients matching archive implementation"""
         p = self.params
         s = p.scales
         c = p.constants
         plasma = p.plasma
 
-        # Diffusion coefficient: D * t_ref / x_ref^2
-        # Note: In continuity, diffusion term is -D * d2n/dx2
-        # After non-dim: -D * (t_ref/x_ref^2) * d2n'/dx'^2
-        alpha = plasma.D * s.t_ref / s.x_ref**2
+        # Diffusion coefficient: -D * t_ref / x_ref^2 (NEGATIVE to match archive)
+        # Archive: alpha = -(D*T_ref)/(L_ref ** 2)
+        alpha = -(plasma.D * s.t_ref / s.x_ref**2)
 
-        # Drift coefficient: mu * phi_ref * t_ref / x_ref^2
-        # Drift term: -d/dx(mu * n * dphi/dx)
-        # = -mu * (n * d2phi/dx2 + dphi/dx * dn/dx)
+        # Drift coefficient: mu * phi_ref * t_ref / x_ref^2 (POSITIVE to match archive)
+        # Archive: beta = (mu*phi_ref*T_ref)/(L_ref ** 2)
         beta = plasma.mu * s.phi_ref * s.t_ref / s.x_ref**2
 
-        # Reaction coefficient: t_ref * R0 / n_ref
-        # Normalizes the reaction rate term
-        gamma = s.t_ref * plasma.R0 / s.n_ref
+        # Reaction coefficient: t_ref / n_ref (matches archive formula)
+        # Archive: gamma = T_ref/N_ref
+        # Note: R_val in residual is multiplied by R0, so gamma doesn't include it
+        gamma = s.t_ref / s.n_ref
 
         # Poisson coefficient: e * n_ref * x_ref^2 / (epsilon_0 * phi_ref)
-        # From: d2phi/dx2 = -(e/epsilon_0) * (n_e - n_i)
-        # After non-dim: d2phi'/dx'^2 = -delta * (n_e' - n_i')
+        # Archive: delta = ((e*N_ref)/epsilon_0) * (L_ref**2)/phi_ref
         delta = (c.e * s.n_ref * s.x_ref**2) / (c.epsilon_0 * s.phi_ref)
 
         self.coeffs = DimensionlessCoefficients(

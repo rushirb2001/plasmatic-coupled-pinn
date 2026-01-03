@@ -212,7 +212,7 @@ class BasePINN(pl.LightningModule):
         Compute PDE residuals for continuity and Poisson equations.
 
         Uses automatic differentiation to compute spatial and temporal derivatives.
-        Returns scaled residuals for numerical stability.
+        Matches archive implementation formula exactly.
         """
         x_t = x_t.clone().requires_grad_(True)
 
@@ -226,6 +226,11 @@ class BasePINN(pl.LightningModule):
         dn_e_dx = grad_ne[:, 0:1]
         dn_e_dt = grad_ne[:, 1:2]
 
+        # d2n_e/dx2
+        d2n_e_dx2 = torch.autograd.grad(
+            dn_e_dx, x_t, ones, create_graph=True
+        )[0][:, 0:1]
+
         # dphi/dx
         grad_phi = torch.autograd.grad(phi, x_t, ones, create_graph=True)[0]
         dphi_dx = grad_phi[:, 0:1]
@@ -238,17 +243,10 @@ class BasePINN(pl.LightningModule):
         # Physics coefficients (from non-dimensionalization)
         coeff = self.nondim.coeffs
 
-        # Electron flux: Gamma_e = -D * dn_e/dx - mu * n_e * dphi/dx
-        Gamma_e = -coeff.alpha * dn_e_dx - coeff.beta * n_e * dphi_dx
-
-        # d(Gamma_e)/dx
-        dGamma_e_dx = torch.autograd.grad(
-            Gamma_e, x_t, ones, create_graph=True
-        )[0][:, 0:1]
-
         # Reaction rate R(x) - symmetric reaction zones
+        # Returns R_0 in reaction zones (matching archive's R_func)
         x_norm = x_t[:, 0:1]
-        R_val = torch.zeros_like(x_norm)
+        R_0 = self.params.plasma.R0
 
         # Reaction zone parameters (normalized)
         d = self.params.domain
@@ -257,17 +255,28 @@ class BasePINN(pl.LightningModule):
 
         mask1 = (x_norm >= x1_norm) & (x_norm <= x2_norm)
         mask2 = (x_norm >= 1.0 - x2_norm) & (x_norm <= 1.0 - x1_norm)
-        R_val = torch.where(mask1 | mask2, torch.ones_like(R_val), R_val)
+        R_val = torch.where(
+            mask1 | mask2,
+            torch.full_like(x_norm, R_0),
+            torch.zeros_like(x_norm)
+        )
 
         # Ion density (normalized) - computed from Boltzmann relation
         n_io = self.params.compute_n_io()
 
-        # Continuity residual: dn_e/dt + d(Gamma_e)/dx - gamma*R = 0
-        # gamma scales the reaction rate term
-        res_cont = dn_e_dt + dGamma_e_dx - coeff.gamma * R_val
+        # Continuity residual (matches archive formula exactly):
+        # res_continuity = dne_t + alpha*dne_xx + beta*(n_e*dphi_xx + dphi_x*dne_x) - gamma*R_x
+        # Where alpha is NEGATIVE, beta is POSITIVE
+        res_cont = (
+            dn_e_dt
+            + coeff.alpha * d2n_e_dx2
+            + coeff.beta * (n_e * d2phi_dx2 + dphi_dx * dn_e_dx)
+            - coeff.gamma * R_val
+        )
 
-        # Poisson residual: d2phi/dx2 + delta*(n_e - n_io) = 0
-        res_pois = d2phi_dx2 + coeff.delta * (n_e - n_io)
+        # Poisson residual (matches archive formula):
+        # res_poisson = dphi_xx - delta*(n_e - n_io)
+        res_pois = d2phi_dx2 - coeff.delta * (n_e - n_io)
 
         return res_cont, res_pois
 

@@ -106,7 +106,7 @@ class ScalingParameters:
     """Non-dimensionalization reference scales"""
     x_ref: float = 0.025          # Reference length (m) - typically L
     t_ref: float = 7.374e-8       # Reference time (s) - typically 1/f
-    n_ref: float = 1.0e16         # Reference density (m^-3)
+    n_ref: float = 1.0e14         # Reference density (m^-3) - matches archive
     phi_ref: float = 100.0        # Reference potential (V) - typically V0
 
     @classmethod
