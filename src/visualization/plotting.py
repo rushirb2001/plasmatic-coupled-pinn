@@ -386,19 +386,12 @@ def plot_comparison_heatmaps(
     err_n_e = np.abs(pred_n_e - ref_n_e) / (np.abs(ref_n_e).max() + eps)
     err_phi = np.abs(pred_phi - ref_phi) / (np.abs(ref_phi).max() + eps)
 
-    # Use FDM reference for consistent colormap limits (FDM is ground truth)
-    # This ensures FDM heatmaps look identical regardless of PINN predictions
-    n_e_vmin = ref_n_e.min()
-    n_e_vmax = ref_n_e.max()
-    phi_vmin = ref_phi.min()
-    phi_vmax = ref_phi.max()
-
     fig, axes = plt.subplots(3, 2, figsize=figsize)
 
-    # Row 1: Reconstructed (PINN)
+    # Row 1: Reconstructed (PINN) - uses its own color scale
     im1 = axes[0, 0].imshow(
         pred_n_e, extent=extent, aspect="auto", origin="lower",
-        cmap="rainbow", vmin=n_e_vmin, vmax=n_e_vmax
+        cmap="rainbow"
     )
     plt.colorbar(im1, ax=axes[0, 0], format="%.2e")
     axes[0, 0].set_title(r"Reconstructed $n_e$ (m$^{-3}$)")
@@ -406,15 +399,15 @@ def plot_comparison_heatmaps(
 
     im2 = axes[0, 1].imshow(
         pred_phi, extent=extent, aspect="auto", origin="lower",
-        cmap="rainbow", vmin=phi_vmin, vmax=phi_vmax
+        cmap="rainbow"
     )
     plt.colorbar(im2, ax=axes[0, 1])
     axes[0, 1].set_title(r"Reconstructed $\phi$ (V)")
 
-    # Row 2: Original (FDM)
+    # Row 2: Original (FDM) - uses its own color scale
     im3 = axes[1, 0].imshow(
         ref_n_e, extent=extent, aspect="auto", origin="lower",
-        cmap="rainbow", vmin=n_e_vmin, vmax=n_e_vmax
+        cmap="rainbow"
     )
     plt.colorbar(im3, ax=axes[1, 0], format="%.2e")
     axes[1, 0].set_title(r"FDM $n_e$ (m$^{-3}$)")
@@ -422,7 +415,7 @@ def plot_comparison_heatmaps(
 
     im4 = axes[1, 1].imshow(
         ref_phi, extent=extent, aspect="auto", origin="lower",
-        cmap="rainbow", vmin=phi_vmin, vmax=phi_vmax
+        cmap="rainbow"
     )
     plt.colorbar(im4, ax=axes[1, 1])
     axes[1, 1].set_title(r"FDM $\phi$ (V)")
