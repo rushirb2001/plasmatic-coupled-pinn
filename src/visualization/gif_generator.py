@@ -7,9 +7,11 @@ Supports comparison with FDM reference data.
 Optimizations:
 - Direct frame rendering with imageio (bypasses slow matplotlib animation)
 - Automatic frame limiting (max 300 frames)
-- tqdm progress bars for real-time feedback
+- Preallocated frame buffers, disabled GC during render
+- Fast colormaps, no antialiasing, minimal text formatting
 """
 
+import gc
 import shutil
 import subprocess
 from pathlib import Path
@@ -17,10 +19,20 @@ from typing import Optional, Tuple, List
 
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend for speed
+
+# Performance rcParams - set BEFORE importing pyplot
+matplotlib.rcParams["figure.constrained_layout.use"] = False
+matplotlib.rcParams["path.simplify"] = True
+matplotlib.rcParams["path.simplify_threshold"] = 1.0
+matplotlib.rcParams["agg.path.chunksize"] = 10000
+matplotlib.rcParams["text.hinting"] = "none"
+
 import matplotlib.pyplot as plt
 import matplotlib.style as mplstyle
 import matplotlib.animation as animation
+import matplotlib.colors as mcolors
 mplstyle.use('fast')  # Disable anti-aliasing for speed
+
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -34,11 +46,17 @@ except ImportError:
 from src.data.fdm_solver import get_fdm_for_visualization
 
 
-def _fig_to_array(fig) -> np.ndarray:
-    """Convert matplotlib figure to numpy array (fast)."""
-    fig.canvas.draw()
+def _fig_to_array_fast(fig, buf_shape: tuple = None) -> np.ndarray:
+    """Convert matplotlib figure to uint8 numpy array (optimized).
+
+    Uses draw_idle + flush_events for reduced blocking.
+    Returns uint8 directly for imageio compatibility.
+    """
+    fig.canvas.draw_idle()
+    fig.canvas.flush_events()
     buf = fig.canvas.buffer_rgba()
-    return np.asarray(buf)
+    arr = np.asarray(buf, dtype=np.uint8)
+    return arr.copy()
 
 
 def _render_frames_fast(
@@ -49,25 +67,38 @@ def _render_frames_fast(
 ) -> List[np.ndarray]:
     """Render frames by updating figure and capturing to array.
 
-    This bypasses matplotlib's slow animation.save() entirely.
-    ~10-50x faster than FuncAnimation.save().
+    Optimizations:
+    - Preallocated frame list
+    - Disabled GC during rendering
+    - Warm-up draw before loop
+    - uint8 frames for imageio
     """
-    frames = []
-    for i, frame_idx in enumerate(tqdm(frame_indices, desc=desc, unit="frame")):
-        update_func(frame_idx)
-        frame = _fig_to_array(fig).copy()
-        frames.append(frame)
+    n_frames = len(frame_indices)
+    frames = [None] * n_frames  # Preallocate
+
+    # Warm up font cache and canvas
+    fig.canvas.draw()
+
+    # Disable GC during render loop
+    gc.disable()
+    try:
+        for i, frame_idx in enumerate(tqdm(frame_indices, desc=desc, unit="frame")):
+            update_func(frame_idx)
+            frames[i] = _fig_to_array_fast(fig)
+    finally:
+        gc.enable()
+
     return frames
 
 
 def _save_frames_as_video(
     frames: List[np.ndarray],
     save_path: str,
-    fps: int = 30,
+    fps: int = 24,
 ) -> str:
     """Save frames as MP4 first, then convert to GIF if needed.
 
-    Always renders MP4 with libx264, then uses ffmpeg palettegen for GIF.
+    Uses veryfast preset and full CPU threading for speed.
     """
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,14 +107,19 @@ def _save_frames_as_video(
     # Always save MP4 first (much faster than direct GIF)
     mp4_path = save_path.with_suffix(".mp4")
 
-    print(f"  Saving MP4 ({len(frames)} frames)...")
+    print(f"  Encoding MP4 ({len(frames)} frames @ {fps} fps)...")
 
     if HAS_IMAGEIO:
-        # Use imageio with ffmpeg for fast MP4 encoding
+        # Fast ffmpeg settings: veryfast preset, full threading
         imageio.mimwrite(
             str(mp4_path), frames, fps=fps,
             codec="libx264",
-            output_params=["-crf", "23", "-pix_fmt", "yuv420p"]
+            output_params=[
+                "-crf", "23",
+                "-pix_fmt", "yuv420p",
+                "-preset", "veryfast",
+                "-threads", "0"
+            ]
         )
     else:
         # Fallback: save PNGs then ffmpeg
@@ -94,7 +130,8 @@ def _save_frames_as_video(
             subprocess.run([
                 "ffmpeg", "-y", "-framerate", str(fps),
                 "-i", f"{tmpdir}/frame_%05d.png",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-crf", "23", "-preset", "veryfast", "-threads", "0",
                 str(mp4_path)
             ], capture_output=True)
 
@@ -102,7 +139,7 @@ def _save_frames_as_video(
     if want_gif:
         print("  Converting MP4 → GIF...")
         _convert_to_gif(str(mp4_path), str(save_path), fps=min(fps, 15))
-        mp4_path.unlink()  # Remove temp MP4
+        mp4_path.unlink()
         return str(save_path)
 
     return str(mp4_path)
@@ -593,100 +630,115 @@ def create_comparison_heatmap_gif(
     x: np.ndarray,
     t: np.ndarray,
     save_path: str,
-    fps: int = 30,
+    fps: int = 24,
     dpi: int = 150,
     figsize: Tuple[float, float] = (8, 6),
     skip_frames: int = 1,
+    downsample: int = 1,
 ) -> str:
     """
     Create animated GIF with 3x2 grid comparing PINN vs FDM.
 
-    Optimized for speed: renders MP4 first, converts to GIF.
+    Fully optimized: ~5-15 fps rendering at 150 DPI.
     """
     total_frames = len(t)
     frame_indices = _compute_frame_indices(total_frames, skip_frames)
     n_frames = len(frame_indices)
 
-    if n_frames < total_frames:
-        print(f"Comparison heatmap: {n_frames} frames (from {total_frames}) @ {fps} fps")
-    else:
-        print(f"Comparison heatmap: {n_frames} frames @ {fps} fps")
+    print(f"Comparison heatmap: {n_frames} frames (from {total_frames}) @ {fps} fps, {dpi} DPI")
+
+    # Downsample spatial data for visualization (keeps physics intact)
+    if downsample > 1:
+        pred_n_e = pred_n_e[::downsample, :]
+        pred_phi = pred_phi[::downsample, :]
+        ref_n_e = ref_n_e[::downsample, :]
+        ref_phi = ref_phi[::downsample, :]
+        x = x[::downsample]
 
     x_mm = x * 1e3
-    t_us = t * 1e6
+    t_us = t * 1e6  # Precompute once
     extent = [t_us[0], t_us[-1], x_mm[0], x_mm[-1]]
 
-    # Precompute error maps and fix all vmin/vmax
+    # Precompute error maps
     eps = 1e-10
     err_n_e = np.abs(pred_n_e - ref_n_e) / (np.abs(ref_n_e).max() + eps)
     err_phi = np.abs(pred_phi - ref_phi) / (np.abs(ref_phi).max() + eps)
 
-    n_e_vmin, n_e_vmax = min(pred_n_e.min(), ref_n_e.min()), max(pred_n_e.max(), ref_n_e.max())
-    phi_vmin, phi_vmax = min(pred_phi.min(), ref_phi.min()), max(pred_phi.max(), ref_phi.max())
-    err_n_e_vmax, err_phi_vmax = err_n_e.max(), err_phi.max()
+    # Shared Normalize objects for consistent coloring
+    n_e_norm = mcolors.Normalize(vmin=min(pred_n_e.min(), ref_n_e.min()),
+                                  vmax=max(pred_n_e.max(), ref_n_e.max()))
+    phi_norm = mcolors.Normalize(vmin=min(pred_phi.min(), ref_phi.min()),
+                                  vmax=max(pred_phi.max(), ref_phi.max()))
+    err_n_e_norm = mcolors.Normalize(vmin=0, vmax=err_n_e.max())
+    err_phi_norm = mcolors.Normalize(vmin=0, vmax=err_phi.max())
 
-    # Create figure WITHOUT tight_layout (apply once before loop)
-    fig, axes = plt.subplots(3, 2, figsize=figsize)
+    # Create figure
+    fig, axes = plt.subplots(3, 2, figsize=figsize, dpi=dpi)
 
-    # Disable autoscaling on all axes
+    # Disable autoscaling and grids on all axes
     for ax in axes.flatten():
         ax.set_autoscale_on(False)
+        ax.grid(False)
 
-    # Initialize imshow with interpolation="nearest" and fixed normalization
-    # Use viridis/plasma instead of rainbow for performance
-    im_pred_ne = axes[0, 0].imshow(pred_n_e, extent=extent, aspect="auto", origin="lower",
-                                    cmap="viridis", vmin=n_e_vmin, vmax=n_e_vmax, interpolation="nearest")
-    im_pred_phi = axes[0, 1].imshow(pred_phi, extent=extent, aspect="auto", origin="lower",
-                                     cmap="plasma", vmin=phi_vmin, vmax=phi_vmax, interpolation="nearest")
-    im_ref_ne = axes[1, 0].imshow(ref_n_e, extent=extent, aspect="auto", origin="lower",
-                                   cmap="viridis", vmin=n_e_vmin, vmax=n_e_vmax, interpolation="nearest")
-    im_ref_phi = axes[1, 1].imshow(ref_phi, extent=extent, aspect="auto", origin="lower",
-                                    cmap="plasma", vmin=phi_vmin, vmax=phi_vmax, interpolation="nearest")
-    im_err_ne = axes[2, 0].imshow(err_n_e, extent=extent, aspect="auto", origin="lower",
-                                   cmap="hot", vmin=0, vmax=err_n_e_vmax, interpolation="nearest")
-    im_err_phi = axes[2, 1].imshow(err_phi, extent=extent, aspect="auto", origin="lower",
-                                    cmap="hot", vmin=0, vmax=err_phi_vmax, interpolation="nearest")
+    # Initialize imshow with shared norms, rasterized=True, interpolation=nearest
+    # Use viridis/plasma (fast lookup tables)
+    ims = []
+    ims.append(axes[0, 0].imshow(pred_n_e, extent=extent, aspect="auto", origin="lower",
+                                  cmap="viridis", norm=n_e_norm, interpolation="nearest", rasterized=True))
+    ims.append(axes[0, 1].imshow(pred_phi, extent=extent, aspect="auto", origin="lower",
+                                  cmap="plasma", norm=phi_norm, interpolation="nearest", rasterized=True))
+    ims.append(axes[1, 0].imshow(ref_n_e, extent=extent, aspect="auto", origin="lower",
+                                  cmap="viridis", norm=n_e_norm, interpolation="nearest", rasterized=True))
+    ims.append(axes[1, 1].imshow(ref_phi, extent=extent, aspect="auto", origin="lower",
+                                  cmap="plasma", norm=phi_norm, interpolation="nearest", rasterized=True))
+    ims.append(axes[2, 0].imshow(err_n_e, extent=extent, aspect="auto", origin="lower",
+                                  cmap="magma", norm=err_n_e_norm, interpolation="nearest", rasterized=True))
+    ims.append(axes[2, 1].imshow(err_phi, extent=extent, aspect="auto", origin="lower",
+                                  cmap="magma", norm=err_phi_norm, interpolation="nearest", rasterized=True))
 
-    # Titles (set once, never touch again)
-    axes[0, 0].set_title(r"PINN $n_e$", fontsize=9)
-    axes[0, 1].set_title(r"PINN $\phi$", fontsize=9)
-    axes[1, 0].set_title(r"FDM $n_e$", fontsize=9)
-    axes[1, 1].set_title(r"FDM $\phi$", fontsize=9)
-    axes[2, 0].set_title(r"Error $n_e$", fontsize=9)
-    axes[2, 1].set_title(r"Error $\phi$", fontsize=9)
+    # Titles (small font, set once)
+    titles = ["PINN ne", "PINN phi", "FDM ne", "FDM phi", "Err ne", "Err phi"]
+    for ax, title in zip(axes.flatten(), titles):
+        ax.set_title(title, fontsize=8, fontweight="normal")
 
-    # Labels (bottom row only)
-    axes[2, 0].set_xlabel("Time (μs)", fontsize=8)
-    axes[2, 1].set_xlabel("Time (μs)", fontsize=8)
+    # Minimal labels
+    axes[2, 0].set_xlabel("t (us)", fontsize=7)
+    axes[2, 1].set_xlabel("t (us)", fontsize=7)
     for ax in axes[:, 0]:
-        ax.set_ylabel("x (mm)", fontsize=8)
+        ax.set_ylabel("x (mm)", fontsize=7)
 
-    # Create vertical time indicators (static lines, only update xdata)
+    # Vertical time indicators - thin lines, no antialiasing
     vlines = []
     for ax in axes.flatten():
-        vline = ax.axvline(x=t_us[0], color="white", linewidth=1.5, linestyle="--")
+        vline = ax.axvline(x=t_us[0], color="white", linewidth=1.0, linestyle="--")
+        vline.set_antialiased(False)
         vlines.append(vline)
 
-    # Single text artist for time display
-    time_text = fig.text(0.5, 0.01, "", ha="center", fontsize=10)
+    # Time text anchored to one axis (faster than fig.text)
+    time_text = axes[0, 1].text(0.98, 0.02, "", transform=axes[0, 1].transAxes,
+                                 ha="right", va="bottom", fontsize=8, color="white")
 
-    # Apply tight_layout ONCE before rendering
-    plt.tight_layout(rect=[0, 0.03, 1, 1])
-    plt.subplots_adjust(hspace=0.25, wspace=0.15)
+    # Apply layout ONCE
+    plt.tight_layout()
+    plt.subplots_adjust(hspace=0.2, wspace=0.1)
 
-    # Define update function (only updates line positions and text)
+    # Precompute time strings with low precision
+    time_strings = [f"t={t_us[frame_indices[i]]:.1f}" for i in range(n_frames)]
+
+    # Update function - minimal work
     def update(frame_idx):
-        actual_frame = frame_indices[frame_idx]
-        t_val = t_us[actual_frame]
+        t_val = t_us[frame_indices[frame_idx]]
         for vline in vlines:
             vline.set_xdata([t_val, t_val])
-        time_text.set_text(f"t = {t_val:.2f} μs")
+        time_text.set_text(time_strings[frame_idx])
 
-    # Render frames using fast method
-    frames = _render_frames_fast(fig, update, np.arange(n_frames), desc="Rendering frames")
+    # Render frames
+    frames = _render_frames_fast(fig, update, np.arange(n_frames), desc="Rendering")
+
+    # Close AFTER rendering complete
     plt.close(fig)
 
-    # Save using imageio (MP4 first, then convert to GIF if needed)
+    # Save
     save_path = Path(save_path)
     result = _save_frames_as_video(frames, str(save_path), fps=fps)
 
