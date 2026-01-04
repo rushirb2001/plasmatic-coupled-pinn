@@ -54,8 +54,8 @@ class DomainParameters:
 class PlasmaParameters:
     """Plasma physics parameters with derived transport coefficients"""
     f: float = 13.56e6            # RF frequency (Hz)
-    V0: float = 100.0             # Voltage amplitude (V)
-    R0: float = 2.7e20            # Reaction rate (m^-3 s^-1)
+    V0: float = 40.0              # Voltage amplitude (V)
+    R0: float = 2.3e20            # Reaction rate (m^-3 s^-1)
     T_e_eV: float = 3.0           # Electron temperature (eV)
     m_i_amu: float = 40.0         # Ion mass (amu)
     nu_m: float = 1e8             # Collision frequency (s^-1)
@@ -106,8 +106,8 @@ class ScalingParameters:
     """Non-dimensionalization reference scales"""
     x_ref: float = 0.025          # Reference length (m) - typically L
     t_ref: float = 7.374e-8       # Reference time (s) - typically 1/f
-    n_ref: float = 1.0e14         # Reference density (m^-3) - matches archive
-    phi_ref: float = 100.0        # Reference potential (V) - typically V0
+    n_ref: float = 1.0e14         # Reference density (m^-3)
+    phi_ref: float = 40.0         # Reference potential (V) - typically V0
 
     @classmethod
     def from_physics(cls, domain: DomainParameters, plasma: PlasmaParameters) -> "ScalingParameters":
