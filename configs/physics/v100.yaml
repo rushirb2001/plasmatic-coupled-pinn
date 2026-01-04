@@ -8,15 +8,15 @@ physics:
     x2: 0.01          # Reaction zone end (m)
 
   plasma:
-    f: 13.56e6        # RF frequency (Hz)
+    f: 13.56e+6       # RF frequency (Hz)
     V0: 100.0         # Voltage amplitude (V) - 2.5x higher than working case
-    R0: 2.7e21        # Reaction rate (m^-3 s^-1) - 10x higher than working case
+    R0: 2.7e+21       # Reaction rate (m^-3 s^-1) - 10x higher than working case
     T_e_eV: 3.0       # Electron temperature (eV)
     m_i_amu: 40.0     # Ion mass (amu)
-    nu_m: 1.0e8       # Collision frequency (s^-1)
+    nu_m: 1.0e+8      # Collision frequency (s^-1)
 
   scales:
     x_ref: 0.025      # Reference length (m)
     t_ref: 7.374e-8   # Reference time (s) = 1/f
-    n_ref: 1.0e14     # Reference density (m^-3) - will be overridden by adaptive scaling
+    n_ref: 1.0e+14    # Reference density (m^-3) - will be overridden by adaptive scaling
     phi_ref: 100.0    # Reference potential (V) - matches V0
