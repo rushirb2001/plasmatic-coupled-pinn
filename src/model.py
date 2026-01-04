@@ -286,29 +286,31 @@ class BasePINN(pl.LightningModule):
         """
         Compute boundary condition losses.
 
-        BCs (normalized coordinates):
-        - x=0: phi = sin(2*pi*t), n_e = 0
-        - x=1: phi = 0, n_e = 0
+        BCs (normalized coordinates, matching FDM convention):
+        - x=0: phi = 0 (grounded), n_e = 0
+        - x=1: phi = sin(2*pi*t) (driven electrode), n_e = 0
         """
         B = t.shape[0]
         device = t.device
 
-        # Left boundary (x=0)
+        # Left boundary (x=0): grounded electrode
         x0 = torch.zeros(B, 1, device=device)
         x_t_left = torch.cat([x0, t], dim=1)
         n_e_0, phi_0 = self(x_t_left)
 
-        # Driving voltage (normalized)
-        V_t = torch.sin(2 * math.pi * t)
+        # phi(0,t) = 0, n_e(0,t) = 0
+        loss_left = torch.mean(n_e_0**2) + torch.mean(phi_0**2)
 
-        loss_left = torch.mean(n_e_0**2) + torch.mean((phi_0 - V_t)**2)
-
-        # Right boundary (x=1)
+        # Right boundary (x=1): driven electrode
         x1 = torch.ones(B, 1, device=device)
         x_t_right = torch.cat([x1, t], dim=1)
         n_e_L, phi_L = self(x_t_right)
 
-        loss_right = torch.mean(n_e_L**2) + torch.mean(phi_L**2)
+        # Driving voltage (normalized): phi(1,t) = sin(2*pi*t)
+        V_t = torch.sin(2 * math.pi * t)
+
+        # phi(1,t) = V(t), n_e(1,t) = 0
+        loss_right = torch.mean(n_e_L**2) + torch.mean((phi_L - V_t)**2)
 
         return loss_left + loss_right
 
