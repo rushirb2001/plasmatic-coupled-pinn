@@ -637,9 +637,19 @@ def visualize_model(
 
     # Use reference grid if available, otherwise create evaluation grid
     if has_ref and ref_x is not None and ref_t is not None:
-        # Normalize reference coordinates for model input
-        x_norm = ref_x / ref_x.max() if ref_x.max() > 0 else ref_x
-        t_norm = ref_t / ref_t.max() if ref_t.max() > 0 else ref_t
+        # Normalize reference coordinates using domain length (L), not max(x)
+        # This is critical because FDM grid goes from 0 to L-dx, not 0 to L.
+        # Using max(x) would make x_norm=1 correspond to L-dx instead of L,
+        # causing PINN to apply boundary conditions at the wrong location.
+        if hasattr(model, 'params'):
+            L = model.params.domain.L
+            T_period = model.params.scales.t_ref
+        else:
+            L = ref_x.max()
+            T_period = ref_t.max()
+
+        x_norm = ref_x / L
+        t_norm = ref_t / T_period
         x = torch.tensor(x_norm, dtype=torch.float32, device=device)
         t = torch.tensor(t_norm, dtype=torch.float32, device=device)
         nx, nt = len(ref_x), len(ref_t)

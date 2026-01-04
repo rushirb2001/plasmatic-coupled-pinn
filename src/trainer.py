@@ -122,9 +122,10 @@ class CollocationDataModule(pl.LightningDataModule):
     Args:
         batch_size: Batch size for training
         num_points: Number of collocation points
-        sampler_type: Type of sampler ('uniform', 'beta', 'grid', 'latin-hypercube')
+        sampler_type: Type of sampler ('uniform', 'beta', 'grid', 'lhs')
         x_range: Spatial domain range (normalized to [0, 1])
         t_range: Temporal domain range (normalized to [0, 1])
+        clamp_x: Whether to clamp x away from boundaries (default: False)
         beta_param: Beta parameter for beta sampling
         val_grid_size: Grid size for validation (nx=nt)
         num_workers: Number of data loading workers
@@ -137,6 +138,7 @@ class CollocationDataModule(pl.LightningDataModule):
         sampler_type: str = "uniform",
         x_range: tuple = (0.0, 1.0),
         t_range: tuple = (0.0, 1.0),
+        clamp_x: bool = False,
         beta_param: float = 1.0,
         val_grid_size: int = 100,
         num_workers: int = 0,
@@ -149,6 +151,7 @@ class CollocationDataModule(pl.LightningDataModule):
         self.sampler_type = sampler_type
         self.x_range = x_range
         self.t_range = t_range
+        self.clamp_x = clamp_x
         self.beta_param = beta_param
         self.val_grid_size = val_grid_size
         self.num_workers = num_workers
@@ -168,6 +171,7 @@ class CollocationDataModule(pl.LightningDataModule):
             x_range=self.x_range,
             t_range=self.t_range,
             num_samples=self.num_points,
+            clamp_x=self.clamp_x,
         )
 
         if self.sampler_type == "uniform":

@@ -40,9 +40,10 @@ model:
 data:
   batch_size: 10000
   num_points: 10000
-  sampler_type: lhs
+  sampler_type: uniform
   x_range: [0.0, 1.0]
   t_range: [0.0, 1.0]
+  clamp_x: false  # Sample full domain including boundaries
   val_grid_size: 100
   num_workers: 0
 
