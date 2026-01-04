@@ -7,7 +7,7 @@ for continuity and sparse matrix solve for Poisson.
 """
 
 from dataclasses import dataclass, field
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, List, Any
 from pathlib import Path
 import numpy as np
 import scipy.sparse as sp
@@ -233,6 +233,62 @@ class FDMSolver:
         data = np.load(path, allow_pickle=True)
         return data['ne'], data['phi'], data['t'], data['x']
 
+    @staticmethod
+    def load_with_params(path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[Dict]]:
+        """
+        Load FDM solution along with embedded parameters.
+
+        Returns:
+            ne, phi, t, x, params_dict (or None if not embedded)
+        """
+        data = np.load(path, allow_pickle=True)
+        params_dict = data['params'].item() if 'params' in data else None
+        return data['ne'], data['phi'], data['t'], data['x'], params_dict
+
+    @staticmethod
+    def validate_params(
+        expected: ParameterSpace,
+        stored: Dict[str, Any],
+        rtol: float = 1e-4,
+    ) -> Tuple[bool, List[str]]:
+        """
+        Validate that stored params match expected params within tolerance.
+
+        Args:
+            expected: Expected ParameterSpace
+            stored: Dictionary of stored parameters from FDM file
+            rtol: Relative tolerance for floating point comparison
+
+        Returns:
+            (is_valid, list_of_mismatches)
+        """
+        mismatches = []
+        expected_dict = expected.to_dict()
+
+        def compare_nested(exp: Dict, sto: Dict, path: str = ""):
+            for key, exp_val in exp.items():
+                full_key = f"{path}.{key}" if path else key
+                if key not in sto:
+                    mismatches.append(f"{full_key}: missing in stored data")
+                    continue
+                sto_val = sto[key]
+                if isinstance(exp_val, dict):
+                    if isinstance(sto_val, dict):
+                        compare_nested(exp_val, sto_val, full_key)
+                    else:
+                        mismatches.append(f"{full_key}: type mismatch (expected dict)")
+                elif isinstance(exp_val, (int, float)):
+                    if not isinstance(sto_val, (int, float)):
+                        mismatches.append(f"{full_key}: type mismatch (expected number)")
+                    elif exp_val == 0:
+                        if abs(sto_val) > rtol:
+                            mismatches.append(f"{full_key}: {sto_val} != {exp_val}")
+                    elif abs((exp_val - sto_val) / exp_val) > rtol:
+                        mismatches.append(f"{full_key}: {sto_val} != {exp_val} (rel diff > {rtol})")
+
+        compare_nested(expected_dict, stored)
+        return len(mismatches) == 0, mismatches
+
 
 class FDMDataset(Dataset):
     """
@@ -344,11 +400,12 @@ def get_or_generate_fdm(
     config: Optional[FDMConfig] = None,
     fdm_dir: str = "data/fdm",
     force_regenerate: bool = False,
+    validate: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Get FDM reference data for given physics parameters.
 
-    If data already exists for these parameters, loads it.
+    If data already exists for these parameters, loads and validates it.
     Otherwise, generates and saves it.
 
     Args:
@@ -356,6 +413,7 @@ def get_or_generate_fdm(
         config: FDM solver configuration (uses defaults if None)
         fdm_dir: Directory to store FDM data files
         force_regenerate: If True, regenerate even if file exists
+        validate: If True, validate embedded params match expected (default True)
 
     Returns:
         Tuple of (ne, phi, t, x) arrays where:
@@ -372,7 +430,29 @@ def get_or_generate_fdm(
 
     if fdm_path.exists() and not force_regenerate:
         print(f"Loading existing FDM data from {fdm_path}")
-        return FDMSolver.load(str(fdm_path))
+
+        if validate:
+            # Load with embedded params and validate
+            ne, phi, t, x, stored_params = FDMSolver.load_with_params(str(fdm_path))
+
+            if stored_params is not None:
+                is_valid, mismatches = FDMSolver.validate_params(params, stored_params)
+                if not is_valid:
+                    print(f"WARNING: FDM params mismatch! Regenerating...")
+                    for m in mismatches[:5]:  # Show first 5 mismatches
+                        print(f"  - {m}")
+                    if len(mismatches) > 5:
+                        print(f"  ... and {len(mismatches) - 5} more")
+                    force_regenerate = True
+                else:
+                    print(f"FDM params validated successfully")
+                    return ne, phi, t, x
+            else:
+                print(f"WARNING: No embedded params in FDM file. Regenerating...")
+                force_regenerate = True
+
+        if not force_regenerate:
+            return FDMSolver.load(str(fdm_path))
 
     # Generate FDM data
     print(f"Generating FDM reference data for parameters: {params.get_fdm_hash()}")
