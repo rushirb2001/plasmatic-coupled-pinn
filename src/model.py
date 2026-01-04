@@ -754,14 +754,21 @@ class AdaptiveSequentialPeriodicPINN(SequentialPeriodicPINN):
 
     def on_fit_start(self):
         """Log coefficients at training start for debugging."""
-        super().on_fit_start() if hasattr(super(), 'on_fit_start') else None
+        if hasattr(super(), 'on_fit_start'):
+            super().on_fit_start()
 
-        # Log all dimensionless coefficients
+        # Get all dimensionless coefficients
         coeff_dict = self.nondim.get_coefficient_dict()
-        for key, value in coeff_dict.items():
-            self.log(f"coeffs/{key}", value, on_step=False, on_epoch=True, prog_bar=False)
 
-        # Also print to console for immediate visibility
+        # Log to logger if available (can't use self.log in on_fit_start)
+        if self.logger is not None:
+            try:
+                for key, value in coeff_dict.items():
+                    self.logger.experiment.add_scalar(f"coeffs/{key}", value, 0)
+            except (AttributeError, TypeError):
+                pass  # Logger doesn't support add_scalar (e.g., WandB, CSV)
+
+        # Print to console for immediate visibility
         print(f"\n{'='*60}")
         print("AdaptiveSequentialPeriodicPINN - Dimensionless Coefficients:")
         print(f"  alpha (diffusion)  = {coeff_dict['alpha']:.4e}")
