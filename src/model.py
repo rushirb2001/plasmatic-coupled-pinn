@@ -139,9 +139,11 @@ class BasePINN(pl.LightningModule):
         # Compile network for faster execution (PyTorch 2.0+)
         self._compile_network()
 
-        # Adaptive loss balancing
-        loss_names = ["continuity", "poisson", "ic"]
-        if not exact_bc:
+        # Adaptive loss balancing - only include losses with weight > 0
+        loss_names = ["continuity", "poisson"]
+        if loss_weights.get("ic", 0.0) > 0:
+            loss_names.append("ic")
+        if not exact_bc and loss_weights.get("bc", 0.0) > 0:
             loss_names.append("bc")
 
         if use_adaptive_weights:
@@ -376,40 +378,50 @@ class BasePINN(pl.LightningModule):
                 print(f"IC pretrain step {step + 1}/{num_steps}, loss: {loss.item():.6f}")
 
     def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
-        """Training step with PDE, IC, and optional BC losses."""
+        """Training step with PDE losses. IC/BC only computed if weight > 0."""
         x_t = batch[0] if isinstance(batch, (list, tuple)) else batch
+        device = x_t.device
+        zero = torch.tensor(0.0, device=device)
 
-        # PDE residuals (autocast disabled - incompatible with higher-order grads)
+        # PDE residuals (always computed - core physics)
         res_cont, res_pois = self.compute_pde_residuals(x_t)
         loss_cont = torch.mean(res_cont**2)
         loss_pois = torch.mean(res_pois**2)
 
-        # Initial condition loss (n_e = n_io at t=0)
-        loss_ic = self.compute_ic_loss()
+        # IC loss: SKIP computation entirely if weight is 0 (major speedup)
+        ic_weight = self.loss_weights.get("ic", 0.0)
+        if ic_weight > 0:
+            loss_ic = self.compute_ic_loss()
+        else:
+            loss_ic = zero
 
-        # Boundary condition loss (only when exact_bc=False)
-        if not self.exact_bc:
+        # BC loss: SKIP computation if exact_bc=True OR weight is 0
+        bc_weight = self.loss_weights.get("bc", 0.0)
+        if not self.exact_bc and bc_weight > 0:
             t = x_t[:, 1:2]
             loss_bc = self.compute_boundary_loss(t)
         else:
-            loss_bc = torch.tensor(0.0, device=x_t.device)
+            loss_bc = zero
 
         # Get loss weights (static or adaptive)
         if self.loss_balancer is not None:
-            # Update adaptive weights
-            losses = {"continuity": loss_cont, "poisson": loss_pois, "ic": loss_ic}
-            if not self.exact_bc:
+            # Only include losses with weight > 0 in adaptive balancing
+            losses = {"continuity": loss_cont, "poisson": loss_pois}
+            if ic_weight > 0:
+                losses["ic"] = loss_ic
+            if not self.exact_bc and bc_weight > 0:
                 losses["bc"] = loss_bc
 
             params = list(self.parameters())
             weights = self.loss_balancer.update(losses, params)
 
             # Log adaptive weights
-            self.log("weight/continuity", weights["continuity"], on_step=False, on_epoch=True)
-            self.log("weight/poisson", weights["poisson"], on_step=False, on_epoch=True)
-            self.log("weight/ic", weights["ic"], on_step=False, on_epoch=True)
-            if not self.exact_bc:
-                self.log("weight/bc", weights["bc"], on_step=False, on_epoch=True)
+            self.log("weight/continuity", weights.get("continuity", 1.0), on_step=False, on_epoch=True)
+            self.log("weight/poisson", weights.get("poisson", 1.0), on_step=False, on_epoch=True)
+            if ic_weight > 0:
+                self.log("weight/ic", weights.get("ic", 0.0), on_step=False, on_epoch=True)
+            if not self.exact_bc and bc_weight > 0:
+                self.log("weight/bc", weights.get("bc", 0.0), on_step=False, on_epoch=True)
 
             # Log gradient norms for debugging
             grad_norms = self.loss_balancer.get_grad_norms()
@@ -418,13 +430,14 @@ class BasePINN(pl.LightningModule):
         else:
             weights = self.loss_weights
 
-        # Total loss
+        # Total loss (only physics losses when IC/BC weights are 0)
         loss = (
             weights["continuity"] * loss_cont +
-            weights["poisson"] * loss_pois +
-            weights["ic"] * loss_ic
+            weights["poisson"] * loss_pois
         )
-        if not self.exact_bc:
+        if ic_weight > 0:
+            loss = loss + weights["ic"] * loss_ic
+        if not self.exact_bc and bc_weight > 0:
             loss = loss + weights["bc"] * loss_bc
 
         # Metrics
@@ -439,8 +452,10 @@ class BasePINN(pl.LightningModule):
         return loss
 
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
-        """Validation step with PDE, IC, and optional BC losses."""
+        """Validation step with PDE losses. IC/BC only computed if weight > 0."""
         x_t = batch[0] if isinstance(batch, (list, tuple)) else batch
+        device = x_t.device
+        zero = torch.tensor(0.0, device=device)
 
         with torch.enable_grad():
             res_cont, res_pois = self.compute_pde_residuals(x_t)
@@ -448,22 +463,28 @@ class BasePINN(pl.LightningModule):
         loss_cont = torch.mean(res_cont**2)
         loss_pois = torch.mean(res_pois**2)
 
-        # Initial condition loss
-        loss_ic = self.compute_ic_loss()
+        # IC loss: SKIP if weight is 0
+        ic_weight = self.loss_weights.get("ic", 0.0)
+        if ic_weight > 0:
+            loss_ic = self.compute_ic_loss()
+        else:
+            loss_ic = zero
 
-        # Boundary condition loss (only when exact_bc=False)
-        if not self.exact_bc:
+        # BC loss: SKIP if exact_bc=True OR weight is 0
+        bc_weight = self.loss_weights.get("bc", 0.0)
+        if not self.exact_bc and bc_weight > 0:
             t = x_t[:, 1:2]
             loss_bc = self.compute_boundary_loss(t)
         else:
-            loss_bc = torch.tensor(0.0, device=x_t.device)
+            loss_bc = zero
 
         loss = (
             self.loss_weights["continuity"] * loss_cont +
-            self.loss_weights["poisson"] * loss_pois +
-            self.loss_weights["ic"] * loss_ic
+            self.loss_weights["poisson"] * loss_pois
         )
-        if not self.exact_bc:
+        if ic_weight > 0:
+            loss = loss + self.loss_weights["ic"] * loss_ic
+        if not self.exact_bc and bc_weight > 0:
             loss = loss + self.loss_weights["bc"] * loss_bc
 
         self.val_metrics["loss_cont"].update(loss_cont)
@@ -477,8 +498,10 @@ class BasePINN(pl.LightningModule):
         return loss
 
     def test_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
-        """Test step with PDE and IC losses."""
+        """Test step with PDE losses. IC/BC only computed if weight > 0."""
         x_t = batch[0] if isinstance(batch, (list, tuple)) else batch
+        device = x_t.device
+        zero = torch.tensor(0.0, device=device)
 
         with torch.enable_grad():
             res_cont, res_pois = self.compute_pde_residuals(x_t)
@@ -486,10 +509,16 @@ class BasePINN(pl.LightningModule):
         loss_cont = torch.mean(res_cont**2)
         loss_pois = torch.mean(res_pois**2)
 
-        # Initial condition loss
-        loss_ic = self.compute_ic_loss()
+        # IC loss: SKIP if weight is 0
+        ic_weight = self.loss_weights.get("ic", 0.0)
+        if ic_weight > 0:
+            loss_ic = self.compute_ic_loss()
+        else:
+            loss_ic = zero
 
-        loss = loss_cont + loss_pois + loss_ic
+        loss = loss_cont + loss_pois
+        if ic_weight > 0:
+            loss = loss + loss_ic
 
         self.test_metrics["loss_cont"].update(loss_cont)
         self.test_metrics["loss_pois"].update(loss_pois)
