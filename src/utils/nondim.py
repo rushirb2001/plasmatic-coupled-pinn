@@ -166,3 +166,87 @@ class NonDimensionalizer:
             f"  delta={self.coeffs.delta:.4e} (Poisson)\n"
             f")"
         )
+
+
+class AdaptiveNonDimensionalizer(NonDimensionalizer):
+    """
+    Adaptive non-dimensionalizer with residual normalization support.
+
+    Extends NonDimensionalizer to:
+    1. Compute characteristic scales for each PDE term
+    2. Provide residual normalization to balance loss contributions
+    3. Support coefficient logging for debugging
+
+    This helps training converge across different parameter regimes
+    where PDE coefficient magnitudes vary significantly.
+    """
+
+    def __init__(self, params: ParameterSpace):
+        super().__init__(params)
+        self._compute_characteristic_scales()
+
+    def _compute_characteristic_scales(self):
+        """
+        Compute characteristic scales for residual normalization.
+
+        The continuity equation has terms:
+        - dn_e/dt: scale ~ 1 (normalized)
+        - alpha * d2n_e/dx2: scale ~ |alpha|
+        - beta * (n_e * d2phi/dx2 + ...): scale ~ |beta|
+        - gamma * R: scale ~ |gamma| * R0_normalized
+
+        The Poisson equation has terms:
+        - d2phi/dx2: scale ~ 1 (normalized)
+        - delta * (n_e - n_io): scale ~ |delta|
+        """
+        c = self.coeffs
+
+        # Continuity characteristic scale: max magnitude of coefficients
+        # gamma * R is multiplied by R0 in the residual, but R0 is already
+        # absorbed into n_io through the Boltzmann relation, so gamma alone is used
+        self.cont_char_scale = max(abs(c.alpha), abs(c.beta), abs(c.gamma), 1e-10)
+
+        # Poisson characteristic scale
+        self.pois_char_scale = max(abs(c.delta), 1.0, 1e-10)
+
+    def get_residual_scales(self) -> dict:
+        """
+        Get characteristic scales for residual normalization.
+
+        Returns:
+            Dictionary with 'continuity' and 'poisson' scales
+        """
+        return {
+            'continuity': self.cont_char_scale,
+            'poisson': self.pois_char_scale,
+        }
+
+    def get_coefficient_dict(self) -> dict:
+        """
+        Get all coefficients as a dictionary for logging.
+
+        Returns:
+            Dictionary with all dimensionless coefficients
+        """
+        c = self.coeffs
+        return {
+            'alpha': c.alpha,
+            'beta': c.beta,
+            'gamma': c.gamma,
+            'delta': c.delta,
+            'n_io_normalized': self.compute_normalized_n_io(),
+            'cont_char_scale': self.cont_char_scale,
+            'pois_char_scale': self.pois_char_scale,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"AdaptiveNonDimensionalizer(\n"
+            f"  alpha={self.coeffs.alpha:.4e} (diffusion)\n"
+            f"  beta={self.coeffs.beta:.4e} (drift)\n"
+            f"  gamma={self.coeffs.gamma:.4e} (reaction)\n"
+            f"  delta={self.coeffs.delta:.4e} (Poisson)\n"
+            f"  cont_char_scale={self.cont_char_scale:.4e}\n"
+            f"  pois_char_scale={self.pois_char_scale:.4e}\n"
+            f")"
+        )

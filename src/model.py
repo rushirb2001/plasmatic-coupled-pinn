@@ -39,8 +39,8 @@ from src.architectures import (
     PoissonSolverGPU,
     FieldCache,
 )
-from src.utils.physics import ParameterSpace, PhysicalConstants
-from src.utils.nondim import NonDimensionalizer
+from src.utils.physics import ParameterSpace, PhysicalConstants, AdaptiveScalingParameters
+from src.utils.nondim import NonDimensionalizer, AdaptiveNonDimensionalizer
 from src.utils.gradients import AdaptiveLossBalancer, GradientMonitor
 from src.data.fdm_solver import get_or_generate_fdm
 from src.visualization.plotting import visualize_model
@@ -709,6 +709,89 @@ class SequentialPeriodicPINN(BasePINN):
         )
 
 
+class AdaptiveSequentialPeriodicPINN(SequentialPeriodicPINN):
+    """
+    Adaptive PINN with FFM (spatial) + Periodic Time Embedding for parameter generalizability.
+
+    Extends SequentialPeriodicPINN with:
+    1. Adaptive scaling: n_ref = n_io (background ion density) so normalized n_e' is O(1)
+    2. Coefficient logging: Logs alpha, beta, gamma, delta at training start
+    3. Optional residual normalization: Normalizes residuals by characteristic scale
+
+    This model is designed to handle different parameter regimes (e.g., high V0, high R0)
+    that fail with fixed scaling parameters.
+
+    Args:
+        normalize_residuals: If True, normalizes PDE residuals by characteristic scales
+        **kwargs: All arguments from SequentialPeriodicPINN
+    """
+
+    def __init__(
+        self,
+        normalize_residuals: bool = True,
+        **kwargs: Any
+    ):
+        self.normalize_residuals = normalize_residuals
+        super().__init__(**kwargs)
+
+        # Replace standard scaling with adaptive scaling
+        self._setup_adaptive_scaling()
+
+    def _setup_adaptive_scaling(self):
+        """Set up adaptive scaling parameters based on physics."""
+        # Compute adaptive scales (n_ref = n_io)
+        adaptive_scales = AdaptiveScalingParameters.from_physics(
+            domain=self.params.domain,
+            plasma=self.params.plasma,
+            constants=self.params.constants
+        )
+
+        # Update params with adaptive scales
+        self.params.scales = adaptive_scales
+
+        # Use AdaptiveNonDimensionalizer for coefficient computation
+        self.nondim = AdaptiveNonDimensionalizer(self.params)
+
+    def on_fit_start(self):
+        """Log coefficients at training start for debugging."""
+        super().on_fit_start() if hasattr(super(), 'on_fit_start') else None
+
+        # Log all dimensionless coefficients
+        coeff_dict = self.nondim.get_coefficient_dict()
+        for key, value in coeff_dict.items():
+            self.log(f"coeffs/{key}", value, on_step=False, on_epoch=True, prog_bar=False)
+
+        # Also print to console for immediate visibility
+        print(f"\n{'='*60}")
+        print("AdaptiveSequentialPeriodicPINN - Dimensionless Coefficients:")
+        print(f"  alpha (diffusion)  = {coeff_dict['alpha']:.4e}")
+        print(f"  beta (drift)       = {coeff_dict['beta']:.4e}")
+        print(f"  gamma (reaction)   = {coeff_dict['gamma']:.4e}")
+        print(f"  delta (Poisson)    = {coeff_dict['delta']:.4e}")
+        print(f"  n_io (normalized)  = {coeff_dict['n_io_normalized']:.4e}")
+        print(f"  cont_char_scale    = {coeff_dict['cont_char_scale']:.4e}")
+        print(f"  pois_char_scale    = {coeff_dict['pois_char_scale']:.4e}")
+        print(f"{'='*60}\n")
+
+    def compute_pde_residuals(
+        self, x_t: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute PDE residuals with optional normalization.
+
+        If normalize_residuals=True, divides residuals by their characteristic scales
+        to balance loss contributions across different parameter regimes.
+        """
+        res_cont, res_pois = super().compute_pde_residuals(x_t)
+
+        if self.normalize_residuals:
+            scales = self.nondim.get_residual_scales()
+            res_cont = res_cont / scales['continuity']
+            res_pois = res_pois / scales['poisson']
+
+        return res_cont, res_pois
+
+
 class GatedPINN(BasePINN):
     """
     PINN with FFM + true Gated MLP (GLU-style).
@@ -1066,6 +1149,7 @@ MODEL_REGISTRY: Dict[str, type] = {
     "base-pinn": BasePINN,
     "sequential-pinn": SequentialPINN,
     "sequential-periodic-pinn": SequentialPeriodicPINN,
+    "adaptive-sequential-periodic-pinn": AdaptiveSequentialPeriodicPINN,
     "gated-pinn": GatedPINN,
     "modulated-mlp-pinn": ModulatedMLPPINN,
     "modulated-pinn": ModulatedPINNModel,
@@ -1079,6 +1163,8 @@ MODEL_REGISTRY: Dict[str, type] = {
     "ffm": SequentialPINN,
     "periodic": SequentialPeriodicPINN,
     "periodic-ffm": SequentialPeriodicPINN,
+    "adaptive-periodic": AdaptiveSequentialPeriodicPINN,
+    "adaptive": AdaptiveSequentialPeriodicPINN,
     "gated": GatedPINN,
     "modulated-mlp": ModulatedMLPPINN,
     "modulated": ModulatedPINNModel,

@@ -98,18 +98,22 @@ class FourierFeatureMapping2D(nn.Module):
         self.out_dim = in_features + 2 * in_features * num_frequencies
 
     def forward(self, coords: torch.Tensor) -> torch.Tensor:
-        x = coords[..., 0:1]
-        t = coords[..., 1:2]
-        freqs = self.frequencies.to(coords.device)
+        x = coords[..., 0:1]  # [B, 1]
+        t = coords[..., 1:2]  # [B, 1]
+        # frequencies is already a buffer, no need for .to(device)
+        freqs = self.frequencies  # [1, 1, F]
 
+        # Broadcasting: [B, 1] * [1, 1, F] -> [B, 1, F]
         x_proj = x * freqs
         t_proj = t * freqs
 
+        # Use squeeze(1) to remove middle dimension: [B, 1, F] -> [B, F]
+        # This is safer than squeeze(0) which was incorrect
         encoded = [
             coords,
-            torch.sin(x_proj).squeeze(0),
-            torch.cos(x_proj).squeeze(0),
-            torch.sin(t_proj).squeeze(0),
-            torch.cos(t_proj).squeeze(0),
+            torch.sin(x_proj).squeeze(1),
+            torch.cos(x_proj).squeeze(1),
+            torch.sin(t_proj).squeeze(1),
+            torch.cos(t_proj).squeeze(1),
         ]
         return torch.cat(encoded, dim=-1)

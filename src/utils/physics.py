@@ -120,6 +120,66 @@ class ScalingParameters:
         )
 
 
+@dataclass
+class AdaptiveScalingParameters:
+    """
+    Adaptive non-dimensionalization reference scales.
+
+    Unlike ScalingParameters which uses fixed n_ref, this class computes
+    n_ref = n_io (background ion density) to ensure normalized electron
+    density n_e' is O(1) across all parameter regimes.
+
+    This improves training stability when R0 or V0 vary significantly.
+    """
+    x_ref: float
+    t_ref: float
+    n_ref: float
+    phi_ref: float
+
+    @classmethod
+    def from_physics(
+        cls,
+        domain: DomainParameters,
+        plasma: PlasmaParameters,
+        constants: Optional[PhysicalConstants] = None
+    ) -> "AdaptiveScalingParameters":
+        """
+        Compute regime-appropriate reference scales.
+
+        Key difference from ScalingParameters: n_ref is computed from physics
+        as n_io = R0 * (x2-x1) * sqrt(m_i / (e * T_e)), ensuring normalized
+        electron density is O(1) regardless of R0.
+
+        Args:
+            domain: Spatial domain parameters
+            plasma: Plasma physics parameters
+            constants: Physical constants (uses defaults if None)
+
+        Returns:
+            AdaptiveScalingParameters with n_ref = n_io
+        """
+        c = constants or PhysicalConstants()
+
+        # Standard scales
+        x_ref = domain.L
+        t_ref = 1.0 / plasma.f
+        phi_ref = plasma.V0
+
+        # Adaptive n_ref: compute n_io from Boltzmann relation
+        # n_io = R0 * (x2 - x1) * sqrt(m_i / (e * T_e))
+        m_i = plasma.m_i_amu * c.amu
+        n_io_physical = (
+            plasma.R0 *
+            domain.reaction_zone_width *
+            (m_i / (c.e * plasma.T_e_eV)) ** 0.5
+        )
+
+        # Use n_io as n_ref so that normalized n_io = 1.0
+        n_ref = n_io_physical
+
+        return cls(x_ref=x_ref, t_ref=t_ref, n_ref=n_ref, phi_ref=phi_ref)
+
+
 class ParameterSpace:
     """
     Nested container for all physics parameters.

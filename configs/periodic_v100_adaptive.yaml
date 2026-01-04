@@ -1,0 +1,71 @@
+# Adaptive Periodic PINN for V0=100V + high R0 regime (failure test)
+#
+# This configuration tests AdaptiveSequentialPeriodicPINN with the known-failing
+# V0=100V, R0=2.7e21 parameter set to verify adaptive scaling helps convergence.
+#
+# Key features:
+# - Adaptive scaling: n_ref = n_io (~5.6e16) ensures normalized n_e' is O(1)
+# - Residual normalization: Balances continuity vs Poisson contributions
+# - Coefficient logging: Shows why this regime is harder (beta is large)
+#
+# Expected behavior:
+# - Without adaptive scaling: fails to converge (loss plateaus or diverges)
+# - With adaptive scaling: should show improved convergence
+#
+# Usage: python -m src.trainer fit --config configs/periodic_v100_adaptive.yaml
+
+# Experiment settings
+auto_name: true
+output_dir: ./experiments
+
+# Model configuration
+model:
+  class_path: src.model.AdaptiveSequentialPeriodicPINN
+  init_args:
+    hidden_layers: [256, 256, 256]
+    activation: tanh
+    num_ffm_frequencies: 2
+    max_t_harmonic: 4
+    exact_bc: true
+    use_exp_ne: true
+    normalize_residuals: true  # Critical for this regime
+    learning_rate: 1e-4
+    optimizer: adam
+    scheduler: constant
+    weight_decay: 0.0
+    loss_weights:
+      continuity: 1.0
+      poisson: 1.0
+      bc: 10.0
+      ic: 0.0
+    use_adaptive_weights: true
+    adaptive_alpha: 0.9
+    visualize_on_train_end: true
+    params_path: configs/physics/v100.yaml  # V0=100V physics (failure regime)
+
+# Data configuration
+data:
+  batch_size: 10000
+  num_points: 10000
+  sampler_type: uniform
+  x_range: [0.0, 1.0]
+  t_range: [0.0, 1.0]
+  clamp_x: false
+  val_grid_size: 100
+  num_workers: 0
+
+# Trainer configuration
+trainer:
+  max_epochs: 100000
+  accelerator: auto
+  devices: 1
+  precision: 32
+  gradient_clip_val: 1.0
+  log_every_n_steps: 10
+  check_val_every_n_epoch: 100
+  enable_progress_bar: true
+  enable_model_summary: true
+
+# Logging (WandB optional)
+use_wandb: false
+wandb_project: pinn-ccp2-adaptive
