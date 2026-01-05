@@ -823,6 +823,15 @@ class AdaptiveSequentialPeriodicPINN(SequentialPeriodicPINN):
         print(f"  n_io (normalized)  = {coeff_dict['n_io_normalized']:.4e}")
         print(f"  cont_char_scale    = {coeff_dict['cont_char_scale']:.4e}")
         print(f"  pois_char_scale    = {coeff_dict['pois_char_scale']:.4e}")
+        print(f"---")
+        print(f"  normalize_residuals = {self.normalize_residuals}")
+        print(f"  use_ema_normalization = {self.use_ema_normalization}")
+        if hasattr(self, '_ema_cont_rms'):
+            print(f"  EMA buffers initialized: YES")
+            print(f"  _ema_cont_rms (init) = {self._ema_cont_rms.item():.4e}")
+            print(f"  _ema_pois_rms (init) = {self._ema_pois_rms.item():.4e}")
+        else:
+            print(f"  EMA buffers initialized: NO")
         print(f"{'='*60}\n")
 
     def compute_pde_residuals(
@@ -838,13 +847,14 @@ class AdaptiveSequentialPeriodicPINN(SequentialPeriodicPINN):
         res_cont, res_pois = super().compute_pde_residuals(x_t)
 
         if self.normalize_residuals:
-            if self.use_ema_normalization and self.training:
-                # Update EMA of residual RMS
-                with torch.no_grad():
-                    cont_rms = torch.sqrt(torch.mean(res_cont ** 2) + 1e-10)
-                    pois_rms = torch.sqrt(torch.mean(res_pois ** 2) + 1e-10)
-                    self._ema_cont_rms = self.ema_decay * self._ema_cont_rms + (1 - self.ema_decay) * cont_rms
-                    self._ema_pois_rms = self.ema_decay * self._ema_pois_rms + (1 - self.ema_decay) * pois_rms
+            if self.use_ema_normalization and hasattr(self, '_ema_cont_rms'):
+                # Update EMA of residual RMS during training
+                if self.training:
+                    with torch.no_grad():
+                        cont_rms = torch.sqrt(torch.mean(res_cont ** 2) + 1e-10)
+                        pois_rms = torch.sqrt(torch.mean(res_pois ** 2) + 1e-10)
+                        self._ema_cont_rms = self.ema_decay * self._ema_cont_rms + (1 - self.ema_decay) * cont_rms
+                        self._ema_pois_rms = self.ema_decay * self._ema_pois_rms + (1 - self.ema_decay) * pois_rms
 
                 # Normalize by EMA (use detached values to avoid gradient through normalization)
                 res_cont = res_cont / (self._ema_cont_rms.detach() + 1e-10)
