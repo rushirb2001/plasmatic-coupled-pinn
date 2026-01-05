@@ -25,6 +25,10 @@ model:
     exact_bc: true
     use_exp_ne: true
     normalize_residuals: true  # Enable residual normalization
+    use_ema_normalization: true  # Use EMA of residual RMS for dynamic balancing
+    ema_decay: 0.99
+    smooth_reaction_zone: true  # Smooth sigmoid transitions at zone boundaries
+    reaction_sharpness: 100.0   # Sharpness of sigmoid (higher = sharper)
     learning_rate: 1e-4
     optimizer: adam
     scheduler: constant

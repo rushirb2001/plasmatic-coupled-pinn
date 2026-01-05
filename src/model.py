@@ -69,6 +69,8 @@ class BasePINN(pl.LightningModule):
         scheduler: Scheduler type ('constant', 'cosine', 'step')
         loss_weights: Dictionary of loss component weights
         params_path: Path to physics parameters YAML (optional)
+        smooth_reaction_zone: Use smooth sigmoid transitions at reaction zone boundaries
+        reaction_sharpness: Sharpness of sigmoid transition (higher = sharper, default 100)
     """
 
     def __init__(
@@ -89,6 +91,8 @@ class BasePINN(pl.LightningModule):
         visualize_on_train_end: bool = True,
         output_dir: str = "./experiments",
         fdm_dir: str = "data/fdm",
+        smooth_reaction_zone: bool = False,
+        reaction_sharpness: float = 100.0,
         **kwargs: Any
     ):
         super().__init__()
@@ -120,6 +124,8 @@ class BasePINN(pl.LightningModule):
         self.visualize_on_train_end = visualize_on_train_end
         self.output_dir = output_dir
         self.fdm_dir = fdm_dir
+        self.smooth_reaction_zone = smooth_reaction_zone
+        self.reaction_sharpness = reaction_sharpness
 
         # Load physics parameters
         if params_path:
@@ -207,6 +213,46 @@ class BasePINN(pl.LightningModule):
         """
         return self.net(x_t)
 
+    def _compute_reaction_rate(self, x_norm: torch.Tensor) -> torch.Tensor:
+        """
+        Compute reaction rate R(x) with optional smooth transitions.
+
+        The reaction zones are at [x1, x2] and [L-x2, L-x1] (symmetric).
+
+        Args:
+            x_norm: Normalized spatial coordinate [B, 1] in [0, 1]
+
+        Returns:
+            R_val: Reaction rate [B, 1], either R0 or 0 (hard) or smooth transition
+        """
+        R_0 = self.params.plasma.R0
+        d = self.params.domain
+        x1_norm = d.x1 / d.L
+        x2_norm = d.x2 / d.L
+
+        if self.smooth_reaction_zone:
+            # Smooth sigmoid transitions at zone boundaries
+            # Zone 1: [x1, x2] - use product of two sigmoids
+            k = self.reaction_sharpness
+            zone1 = torch.sigmoid(k * (x_norm - x1_norm)) * torch.sigmoid(k * (x2_norm - x_norm))
+
+            # Zone 2: [1-x2, 1-x1] (symmetric)
+            zone2 = torch.sigmoid(k * (x_norm - (1.0 - x2_norm))) * torch.sigmoid(k * ((1.0 - x1_norm) - x_norm))
+
+            # Combine zones (max ensures no overlap issues)
+            R_val = R_0 * torch.maximum(zone1, zone2)
+        else:
+            # Hard step function (original behavior)
+            mask1 = (x_norm >= x1_norm) & (x_norm <= x2_norm)
+            mask2 = (x_norm >= 1.0 - x2_norm) & (x_norm <= 1.0 - x1_norm)
+            R_val = torch.where(
+                mask1 | mask2,
+                torch.full_like(x_norm, R_0),
+                torch.zeros_like(x_norm)
+            )
+
+        return R_val
+
     def compute_pde_residuals(
         self, x_t: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -246,22 +292,8 @@ class BasePINN(pl.LightningModule):
         coeff = self.nondim.coeffs
 
         # Reaction rate R(x) - symmetric reaction zones
-        # Returns R_0 in reaction zones (matching archive's R_func)
         x_norm = x_t[:, 0:1]
-        R_0 = self.params.plasma.R0
-
-        # Reaction zone parameters (normalized)
-        d = self.params.domain
-        x1_norm = d.x1 / d.L
-        x2_norm = d.x2 / d.L
-
-        mask1 = (x_norm >= x1_norm) & (x_norm <= x2_norm)
-        mask2 = (x_norm >= 1.0 - x2_norm) & (x_norm <= 1.0 - x1_norm)
-        R_val = torch.where(
-            mask1 | mask2,
-            torch.full_like(x_norm, R_0),
-            torch.zeros_like(x_norm)
-        )
+        R_val = self._compute_reaction_rate(x_norm)
 
         # Ion density (normalized) - computed from Boltzmann relation
         n_io = self.params.compute_n_io()
@@ -716,26 +748,38 @@ class AdaptiveSequentialPeriodicPINN(SequentialPeriodicPINN):
     Extends SequentialPeriodicPINN with:
     1. Adaptive scaling: n_ref = n_io (background ion density) so normalized n_e' is O(1)
     2. Coefficient logging: Logs alpha, beta, gamma, delta at training start
-    3. Optional residual normalization: Normalizes residuals by characteristic scale
+    3. Optional residual normalization: Normalizes residuals by characteristic scale or EMA
 
     This model is designed to handle different parameter regimes (e.g., high V0, high R0)
     that fail with fixed scaling parameters.
 
     Args:
         normalize_residuals: If True, normalizes PDE residuals by characteristic scales
+        use_ema_normalization: If True, uses EMA of residual RMS instead of fixed scales
+        ema_decay: Decay factor for EMA (default 0.99)
         **kwargs: All arguments from SequentialPeriodicPINN
     """
 
     def __init__(
         self,
         normalize_residuals: bool = True,
+        use_ema_normalization: bool = False,
+        ema_decay: float = 0.99,
         **kwargs: Any
     ):
         self.normalize_residuals = normalize_residuals
+        self.use_ema_normalization = use_ema_normalization
+        self.ema_decay = ema_decay
         super().__init__(**kwargs)
 
         # Replace standard scaling with adaptive scaling
         self._setup_adaptive_scaling()
+
+        # EMA buffers for residual RMS (initialized from characteristic scales)
+        if self.use_ema_normalization:
+            scales = self.nondim.get_residual_scales()
+            self.register_buffer('_ema_cont_rms', torch.tensor(scales['continuity']))
+            self.register_buffer('_ema_pois_rms', torch.tensor(scales['poisson']))
 
     def _setup_adaptive_scaling(self):
         """Set up adaptive scaling parameters based on physics."""
@@ -774,6 +818,7 @@ class AdaptiveSequentialPeriodicPINN(SequentialPeriodicPINN):
         print(f"  alpha (diffusion)  = {coeff_dict['alpha']:.4e}")
         print(f"  beta (drift)       = {coeff_dict['beta']:.4e}")
         print(f"  gamma (reaction)   = {coeff_dict['gamma']:.4e}")
+        print(f"  gamma * R0 (src)   = {coeff_dict['gamma_R0']:.4e}")
         print(f"  delta (Poisson)    = {coeff_dict['delta']:.4e}")
         print(f"  n_io (normalized)  = {coeff_dict['n_io_normalized']:.4e}")
         print(f"  cont_char_scale    = {coeff_dict['cont_char_scale']:.4e}")
@@ -786,15 +831,29 @@ class AdaptiveSequentialPeriodicPINN(SequentialPeriodicPINN):
         """
         Compute PDE residuals with optional normalization.
 
-        If normalize_residuals=True, divides residuals by their characteristic scales
-        to balance loss contributions across different parameter regimes.
+        If normalize_residuals=True:
+        - use_ema_normalization=False: divides by fixed characteristic scales
+        - use_ema_normalization=True: divides by EMA of residual RMS (adaptive)
         """
         res_cont, res_pois = super().compute_pde_residuals(x_t)
 
         if self.normalize_residuals:
-            scales = self.nondim.get_residual_scales()
-            res_cont = res_cont / scales['continuity']
-            res_pois = res_pois / scales['poisson']
+            if self.use_ema_normalization and self.training:
+                # Update EMA of residual RMS
+                with torch.no_grad():
+                    cont_rms = torch.sqrt(torch.mean(res_cont ** 2) + 1e-10)
+                    pois_rms = torch.sqrt(torch.mean(res_pois ** 2) + 1e-10)
+                    self._ema_cont_rms = self.ema_decay * self._ema_cont_rms + (1 - self.ema_decay) * cont_rms
+                    self._ema_pois_rms = self.ema_decay * self._ema_pois_rms + (1 - self.ema_decay) * pois_rms
+
+                # Normalize by EMA (use detached values to avoid gradient through normalization)
+                res_cont = res_cont / (self._ema_cont_rms.detach() + 1e-10)
+                res_pois = res_pois / (self._ema_pois_rms.detach() + 1e-10)
+            else:
+                # Use fixed characteristic scales
+                scales = self.nondim.get_residual_scales()
+                res_cont = res_cont / scales['continuity']
+                res_pois = res_pois / scales['poisson']
 
         return res_cont, res_pois
 

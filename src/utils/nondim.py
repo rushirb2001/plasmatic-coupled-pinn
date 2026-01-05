@@ -193,20 +193,21 @@ class AdaptiveNonDimensionalizer(NonDimensionalizer):
         - dn_e/dt: scale ~ 1 (normalized)
         - alpha * d2n_e/dx2: scale ~ |alpha|
         - beta * (n_e * d2phi/dx2 + ...): scale ~ |beta|
-        - gamma * R: scale ~ |gamma| * R0_normalized
+        - gamma * R0: scale ~ |gamma * R0| (R0 is used directly in residual!)
 
         The Poisson equation has terms:
         - d2phi/dx2: scale ~ 1 (normalized)
-        - delta * (n_e - n_io): scale ~ |delta|
+        - delta * (n_e - n_io): scale ~ |delta| (n_io = 1 with adaptive scaling)
         """
         c = self.coeffs
 
         # Continuity characteristic scale: max magnitude of coefficients
-        # gamma * R is multiplied by R0 in the residual, but R0 is already
-        # absorbed into n_io through the Boltzmann relation, so gamma alone is used
-        self.cont_char_scale = max(abs(c.alpha), abs(c.beta), abs(c.gamma), 1e-10)
+        # IMPORTANT: gamma * R0 is the actual source term magnitude (R0 is physical value)
+        gamma_R0 = abs(c.gamma * self.params.plasma.R0)
+        self.cont_char_scale = max(abs(c.alpha), abs(c.beta), gamma_R0, 1e-10)
 
         # Poisson characteristic scale
+        # With adaptive scaling, n_io = 1.0, so (n_e - n_io) is O(1) when n_e ~ 1
         self.pois_char_scale = max(abs(c.delta), 1.0, 1e-10)
 
     def get_residual_scales(self) -> dict:
@@ -229,10 +230,12 @@ class AdaptiveNonDimensionalizer(NonDimensionalizer):
             Dictionary with all dimensionless coefficients
         """
         c = self.coeffs
+        gamma_R0 = c.gamma * self.params.plasma.R0
         return {
             'alpha': c.alpha,
             'beta': c.beta,
             'gamma': c.gamma,
+            'gamma_R0': gamma_R0,  # Actual source term magnitude
             'delta': c.delta,
             'n_io_normalized': self.compute_normalized_n_io(),
             'cont_char_scale': self.cont_char_scale,
