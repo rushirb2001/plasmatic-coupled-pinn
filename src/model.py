@@ -44,7 +44,6 @@ from src.utils.nondim import NonDimensionalizer, AdaptiveNonDimensionalizer
 from src.utils.gradients import AdaptiveLossBalancer, GradientMonitor
 from src.data.fdm_solver import get_or_generate_fdm
 from src.visualization.plotting import visualize_model
-from src.visualization.gif_generator import generate_model_animation
 
 
 class BasePINN(pl.LightningModule):
@@ -645,16 +644,6 @@ class BasePINN(pl.LightningModule):
                 nx=100,
                 nt=100,
                 save_dir=str(output_path / "visualizations"),
-                device=str(self.device),
-                fdm_dir=self.fdm_dir,
-            )
-
-            generate_model_animation(
-                model=self,
-                save_path=str(output_path / "visualizations" / "solution.gif"),
-                nx=100,
-                nt=100,
-                fps=30,
                 device=str(self.device),
                 fdm_dir=self.fdm_dir,
             )
