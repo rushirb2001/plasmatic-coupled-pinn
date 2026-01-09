@@ -64,7 +64,7 @@ class BasePINN(pl.LightningModule):
         hidden_layers: List of hidden layer dimensions
         activation: Activation function ('tanh', 'relu', 'gelu', 'silu')
         learning_rate: Learning rate for optimizer
-        optimizer: Optimizer type ('adam', 'adamw', 'sgd')
+        optimizer: Optimizer type ('adam', 'adamw', 'sgd', 'lbfgs')
         scheduler: Scheduler type ('constant', 'cosine', 'step')
         loss_weights: Dictionary of loss component weights
         params_path: Path to physics parameters YAML (optional)
@@ -580,6 +580,17 @@ class BasePINN(pl.LightningModule):
                 lr=self.learning_rate,
                 weight_decay=self.weight_decay,
                 momentum=0.9
+            )
+        elif self.optimizer_name == "lbfgs":
+            # LBFGS: Second-order optimizer for fine-tuning after Adam plateau
+            # Note: LBFGS doesn't support weight_decay or fused kernels
+            # PyTorch Lightning handles the closure automatically
+            optimizer = torch.optim.LBFGS(
+                self.parameters(),
+                lr=self.learning_rate,
+                max_iter=20,           # Inner iterations per step
+                history_size=50,       # Number of past updates to store
+                line_search_fn='strong_wolfe'  # Wolfe line search for stability
             )
         else:
             optimizer = torch.optim.Adam(
