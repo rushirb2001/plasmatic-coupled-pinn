@@ -1,13 +1,4 @@
-# Adaptive Periodic PINN for V0=40V regime (regression test)
-#
-# This configuration tests AdaptiveSequentialPeriodicPINN with the known-good
-# V0=40V, R0=2.3e20 parameter set to verify it still converges after changes.
-#
-# Key features:
-# - Adaptive scaling: n_ref = n_io for stable gradients
-# - Residual normalization: Balances PDE contributions
-# - Coefficient logging: Visibility into dimensionless parameters
-#
+# Adaptive Periodic PINN for V0=40V regime
 # Usage: python -m src.trainer fit --config configs/periodic_v40_adaptive.yaml
 
 # Experiment settings
@@ -18,30 +9,41 @@ output_dir: ./experiments
 model:
   class_path: src.model.AdaptiveSequentialPeriodicPINN
   init_args:
+    # Architecture
     hidden_layers: [256, 256, 256]
     activation: tanh
     num_ffm_frequencies: 2
     max_t_harmonic: 4
     exact_bc: true
     use_exp_ne: true
-    normalize_residuals: true  # Enable residual normalization
-    use_ema_normalization: true  # Use EMA of residual RMS for dynamic balancing
-    ema_decay: 0.9  # Faster tracking (0.99 was too slow)
-    smooth_reaction_zone: true  # Smooth sigmoid transitions at zone boundaries
-    reaction_sharpness: 100.0   # Sharpness of sigmoid (higher = sharper)
+
+    # Physics
+    params_path: configs/physics/v40.yaml
+    smooth_reaction_zone: true
+    reaction_sharpness: 100.0
+
+    # Residual normalization
+    normalize_residuals: true
+    use_ema_normalization: true
+    ema_decay: 0.9
+
+    # Optimization
     learning_rate: 1e-4
     optimizer: adam
     scheduler: constant
     weight_decay: 0.0
+
+    # Loss
     loss_weights:
       continuity: 1.0
       poisson: 1.0
       bc: 10.0
-      ic: 0.0  # Disabled - conflicts with exact BC enforcement
+      ic: 0.0
     use_adaptive_weights: true
     adaptive_alpha: 0.9
+
+    # Output
     visualize_on_train_end: true
-    params_path: configs/physics/v40.yaml  # V0=40V physics
 
 # Data configuration
 data:
@@ -66,6 +68,6 @@ trainer:
   enable_progress_bar: true
   enable_model_summary: true
 
-# Logging (WandB optional)
+# Logging
 use_wandb: false
 wandb_project: pinn-ccp2-adaptive

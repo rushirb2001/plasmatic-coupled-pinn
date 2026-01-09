@@ -2,7 +2,6 @@
 # Usage: python -m src.trainer fit --config configs/default.yaml
 
 # Experiment settings
-# experiment_name: null  # Auto-generated: {model}_{sampler}_lr{lr}_{timestamp}
 auto_name: true
 output_dir: ./experiments
 
@@ -10,19 +9,26 @@ output_dir: ./experiments
 model:
   class_path: src.model.SequentialPINN
   init_args:
+    # Architecture
     hidden_layers: [64, 64, 64]
     activation: tanh
     num_ffm_frequencies: 2
     exact_bc: true
+
+    # Optimization
     learning_rate: 1e-3
     optimizer: adamw
     scheduler: cosine
     weight_decay: 0.0
+
+    # Loss
     loss_weights:
       continuity: 1.0
       poisson: 1.0
       bc: 10.0
     use_adaptive_weights: false
+
+    # Output
     visualize_on_train_end: true
 
 # Data configuration
@@ -47,6 +53,6 @@ trainer:
   enable_progress_bar: true
   enable_model_summary: true
 
-# Logging (WandB optional)
+# Logging
 use_wandb: false
 wandb_project: pinn-ccp2

@@ -1,17 +1,4 @@
-# Adaptive Periodic PINN for V0=100V + high R0 regime (failure test)
-#
-# This configuration tests AdaptiveSequentialPeriodicPINN with the known-failing
-# V0=100V, R0=2.7e21 parameter set to verify adaptive scaling helps convergence.
-#
-# Key features:
-# - Adaptive scaling: n_ref = n_io (~5.6e16) ensures normalized n_e' is O(1)
-# - Residual normalization: Balances continuity vs Poisson contributions
-# - Coefficient logging: Shows why this regime is harder (beta is large)
-#
-# Expected behavior:
-# - Without adaptive scaling: fails to converge (loss plateaus or diverges)
-# - With adaptive scaling: should show improved convergence
-#
+# Adaptive Periodic PINN for V0=100V + high R0 regime
 # Usage: python -m src.trainer fit --config configs/periodic_v100_adaptive.yaml
 
 # Experiment settings
@@ -22,21 +9,31 @@ output_dir: ./experiments
 model:
   class_path: src.model.AdaptiveSequentialPeriodicPINN
   init_args:
+    # Architecture
     hidden_layers: [256, 256, 256]
     activation: tanh
     num_ffm_frequencies: 2
     max_t_harmonic: 4
     exact_bc: true
     use_exp_ne: true
-    normalize_residuals: true  # Critical for this regime
-    use_ema_normalization: true  # Use EMA of residual RMS for dynamic balancing
+
+    # Physics
+    params_path: configs/physics/v100.yaml
+    smooth_reaction_zone: true
+    reaction_sharpness: 100.0
+
+    # Residual normalization
+    normalize_residuals: true
+    use_ema_normalization: true
     ema_decay: 0.99
-    smooth_reaction_zone: true  # Smooth sigmoid transitions at zone boundaries
-    reaction_sharpness: 100.0   # Sharpness of sigmoid (higher = sharper)
+
+    # Optimization
     learning_rate: 1e-4
     optimizer: adam
     scheduler: constant
     weight_decay: 0.0
+
+    # Loss
     loss_weights:
       continuity: 1.0
       poisson: 1.0
@@ -44,8 +41,9 @@ model:
       ic: 0.0
     use_adaptive_weights: true
     adaptive_alpha: 0.9
+
+    # Output
     visualize_on_train_end: true
-    params_path: configs/physics/v100.yaml  # V0=100V physics (failure regime)
 
 # Data configuration
 data:
@@ -70,6 +68,6 @@ trainer:
   enable_progress_bar: true
   enable_model_summary: true
 
-# Logging (WandB optional)
+# Logging
 use_wandb: false
 wandb_project: pinn-ccp2-adaptive

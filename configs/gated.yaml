@@ -1,27 +1,36 @@
 # Gated PINN configuration
 # Usage: python -m src.trainer fit --config configs/gated.yaml
 
-# experiment_name: null  # Auto-generated
+# Experiment settings
 auto_name: true
 output_dir: ./experiments
 
+# Model configuration
 model:
   class_path: src.model.GatedPINN
   init_args:
+    # Architecture
     hidden_layers: [64, 64, 64]
     activation: tanh
     num_ffm_frequencies: 2
     exact_bc: true
+
+    # Optimization
     learning_rate: 1e-3
     optimizer: adamw
     scheduler: cosine
+
+    # Loss
     loss_weights:
       continuity: 1.0
       poisson: 1.0
       bc: 10.0
     use_adaptive_weights: false
+
+    # Output
     visualize_on_train_end: true
 
+# Data configuration
 data:
   batch_size: 4096
   num_points: 2000000
@@ -30,6 +39,7 @@ data:
   t_range: [0.0, 1.0]
   val_grid_size: 100
 
+# Trainer configuration
 trainer:
   max_epochs: 100000
   accelerator: auto
@@ -39,4 +49,5 @@ trainer:
   log_every_n_steps: 10
   check_val_every_n_epoch: 10
 
+# Logging
 use_wandb: true
