@@ -17,6 +17,7 @@ Usage:
     python -m src.trainer test --ckpt_path=path/to/checkpoint.ckpt
 """
 
+import gc
 import os
 import warnings
 from datetime import datetime
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 warnings.filterwarnings("ignore", category=UserWarning)
+gc.disable()  # Disable GC during training for performance
 
 import torch
 from torch.utils.data import DataLoader, TensorDataset
@@ -51,42 +53,39 @@ def generate_experiment_name(config: Dict[str, Any]) -> str:
     """
     Auto-generate experiment name from config.
 
-    Pattern: {model_class}_{sampler_type}_lr{learning_rate}_{timestamp}
+    Pattern: {Model_Architecture}_{Collocation_Strategy}_{Learning_Rate}_{hash}
 
     Examples:
-    - SequentialPINN_uniform_lr1e-03_20241231_143052
-    - GatedPINN_beta_lr5e-04_20241231_150000
+    - SequentialPINN_uniform_1e-03_a3f2b1
+    - GatedPINN_beta_5e-04_c7d8e9
     """
+    import hashlib
+
+    # Helper to get attribute from dict or namespace
+    def get_attr(obj, key, default=None):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
     # Extract model class name
-    model_config = config.get("model", {})
-    if isinstance(model_config, dict):
-        class_path = model_config.get("class_path", "BasePINN")
-        # Extract class name from path like "src.model.SequentialPINN"
-        model_name = class_path.split(".")[-1] if "." in class_path else class_path
-    else:
-        model_name = "PINN"
+    model_config = get_attr(config, "model", {})
+    class_path = get_attr(model_config, "class_path", "BasePINN")
+    # Extract class name from path like "src.model.SequentialPINN"
+    model_name = class_path.split(".")[-1] if class_path and "." in class_path else (class_path or "PINN")
 
     # Extract sampler type
-    data_config = config.get("data", {})
-    if isinstance(data_config, dict):
-        sampler_type = data_config.get("sampler_type", "uniform")
-    else:
-        sampler_type = "uniform"
+    data_config = get_attr(config, "data", {})
+    sampler_type = get_attr(data_config, "sampler_type", "uniform")
 
     # Extract learning rate
-    if isinstance(model_config, dict):
-        init_args = model_config.get("init_args", {})
-        if isinstance(init_args, dict):
-            lr = init_args.get("learning_rate", 1e-3)
-        else:
-            lr = 1e-3
-    else:
-        lr = 1e-3
+    init_args = get_attr(model_config, "init_args", {})
+    lr = get_attr(init_args, "learning_rate", 1e-3)
 
-    # Timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Generate short hash from timestamp for uniqueness
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    short_hash = hashlib.md5(timestamp.encode()).hexdigest()[:6]
 
-    return f"{model_name}_{sampler_type}_lr{lr:.0e}_{timestamp}"
+    return f"{model_name}_{sampler_type}_{lr:.0e}_{short_hash}"
 
 
 def get_wandb_run_name(experiment_name: str, config: Dict[str, Any]) -> str:
@@ -311,10 +310,17 @@ class PINNLightningCLI(LightningCLI):
         exp_dir.mkdir(parents=True, exist_ok=True)
 
         # Update model output_dir to match experiment directory
-        if "model" in config and isinstance(config["model"], dict):
-            if "init_args" not in config["model"]:
-                config["model"]["init_args"] = {}
-            config["model"]["init_args"]["output_dir"] = str(exp_dir)
+        model_config = config.get("model") if isinstance(config, dict) else getattr(config, "model", None)
+        if model_config is not None:
+            if isinstance(model_config, dict):
+                if "init_args" not in model_config:
+                    model_config["init_args"] = {}
+                model_config["init_args"]["output_dir"] = str(exp_dir)
+            else:
+                # Handle Namespace objects
+                init_args = getattr(model_config, "init_args", None)
+                if init_args is not None:
+                    init_args.output_dir = str(exp_dir)
 
         if subcommand == "fit":
             self._setup_fit_callbacks(config, experiment_name, output_dir)

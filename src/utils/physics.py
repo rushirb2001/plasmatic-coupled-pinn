@@ -351,9 +351,13 @@ class ParameterSpace:
             f")"
         )
 
-    def get_fdm_hash(self) -> str:
+    def get_fdm_hash(self, nx: int = None, n_steps: int = None) -> str:
         """
         Generate a unique hash based on physics parameters for FDM file naming.
+
+        Args:
+            nx: Optional spatial resolution (included in hash if provided)
+            n_steps: Optional temporal steps per cycle (included in hash if provided)
 
         Returns:
             8-character hash string identifying this parameter configuration
@@ -370,13 +374,22 @@ class ParameterSpace:
             f"mi={self.plasma.m_i_amu:.6e}_"
             f"nu={self.plasma.nu_m:.6e}"
         )
+        # Include resolution in hash if provided
+        if nx is not None:
+            key_params += f"_nx={nx}"
+        if n_steps is not None:
+            key_params += f"_nt={n_steps}"
         return hashlib.md5(key_params.encode()).hexdigest()[:8]
 
-    def get_fdm_filename(self) -> str:
+    def get_fdm_filename(self, nx: int = None, n_steps: int = None) -> str:
         """
-        Generate FDM filename based on physics parameters.
+        Generate FDM filename based on physics parameters and resolution.
+
+        Args:
+            nx: Optional spatial resolution
+            n_steps: Optional temporal steps per cycle
 
         Returns:
             Filename like 'fdm_a1b2c3d4.npz'
         """
-        return f"fdm_{self.get_fdm_hash()}.npz"
+        return f"fdm_{self.get_fdm_hash(nx=nx, n_steps=n_steps)}.npz"

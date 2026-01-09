@@ -202,20 +202,20 @@ class AdaptiveLossBalancer:
         self,
         loss: torch.Tensor,
         params: List[torch.Tensor],
-    ) -> float:
-        """Compute mean absolute gradient (L1-style norm) for a loss."""
+    ) -> torch.Tensor:
+        """Compute mean absolute gradient (L1-style norm) for a loss. Returns tensor to avoid sync."""
         grads = torch.autograd.grad(
             loss, params, retain_graph=True, create_graph=False, allow_unused=True
         )
 
         flat = self._flatten_grads(grads)
-        return torch.mean(torch.abs(flat)).item()
+        return torch.mean(torch.abs(flat))  # Keep as tensor, no .item()
 
     def update(
         self,
         losses: Dict[str, torch.Tensor],
         params: List[torch.Tensor],
-    ) -> Dict[str, float]:
+    ) -> Dict[str, torch.Tensor]:
         """
         Update loss weights based on gradient magnitudes.
 
@@ -223,63 +223,69 @@ class AdaptiveLossBalancer:
         so that the loss with the largest gradient gets weight 1.0 and others
         are scaled up proportionally.
 
+        Optimized: All computations stay on GPU, no CPU sync.
+
         Args:
             losses: Dictionary of loss tensors
             params: List of parameters to compute gradients for
 
         Returns:
-            Updated weight dictionary
+            Updated weight dictionary (tensors on GPU)
         """
-        grad_norms = {}
-
-        # Compute mean absolute gradient for each loss
+        # Compute all gradient norms as tensors on GPU
+        grad_norm_tensors = {}
         for name, loss in losses.items():
             if name not in self.loss_names:
                 continue
-            grad_norms[name] = self._mean_abs_norm(loss, params)
+            grad_norm_tensors[name] = self._mean_abs_norm(loss, params)
 
-        self.last_grad_norms = grad_norms.copy()
-
-        if not grad_norms:
+        if not grad_norm_tensors:
             return self.weights
 
-        # Find maximum gradient norm
-        max_norm = max(grad_norms.values())
+        # Stack norms and compute max on GPU
+        names = list(grad_norm_tensors.keys())
+        norms_tensor = torch.stack([grad_norm_tensors[n] for n in names])
+        max_norm = norms_tensor.max()
 
-        # Avoid division by zero
-        if max_norm < 1e-10:
-            return self.weights
+        # Store for logging (keep as tensors)
+        self.last_grad_norms = grad_norm_tensors
 
-        # Update weights with EMA using max-based normalization
-        for name in self.loss_names:
-            if name not in grad_norms:
-                continue
+        # Compute target weights on GPU: max_norm / norm
+        target_weights = max_norm / (norms_tensor + 1e-10)
 
-            norm = grad_norms[name]
+        # Update weights with EMA (all on GPU)
+        for i, name in enumerate(names):
+            if not isinstance(self.weights[name], torch.Tensor):
+                # First call: convert float to tensor
+                device = target_weights.device
+                self.weights[name] = torch.tensor(self.weights[name], device=device)
 
-            # Target weight: max_norm / norm
-            # Loss with largest gradient gets weight ~1
-            # Losses with smaller gradients get larger weights
-            if norm > 1e-10:
-                target_weight = max_norm / norm
-            else:
-                target_weight = self.weights[name]
-
-            # Fast EMA update (alpha=0.9 means 10% old + 90% new)
             self.weights[name] = (
                 (1 - self.alpha) * self.weights[name] +
-                self.alpha * target_weight
+                self.alpha * target_weights[i]
             )
 
         return self.weights
 
     def get_grad_norms(self) -> Dict[str, float]:
-        """Get last computed gradient norms (for logging/debugging)."""
-        return self.last_grad_norms.copy()
+        """Get last computed gradient norms (for logging/debugging). Syncs to CPU here."""
+        result = {}
+        for name, val in self.last_grad_norms.items():
+            if isinstance(val, torch.Tensor):
+                result[name] = val.detach().cpu().item()
+            else:
+                result[name] = val
+        return result
 
     def get_weights(self) -> Dict[str, float]:
-        """Get current loss weights."""
-        return self.weights.copy()
+        """Get current loss weights. Syncs to CPU if needed."""
+        result = {}
+        for name, val in self.weights.items():
+            if isinstance(val, torch.Tensor):
+                result[name] = val.detach().cpu().item()
+            else:
+                result[name] = val
+        return result
 
     def compute_weighted_loss(
         self,

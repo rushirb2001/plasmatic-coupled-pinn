@@ -144,6 +144,12 @@ class BasePINN(pl.LightningModule):
         # Compile network for faster execution (PyTorch 2.0+)
         self._compile_network()
 
+        # Register zero buffer to avoid GPU allocation every step
+        self.register_buffer("_zero", torch.tensor(0.0), persistent=False)
+
+        # Cache parameter list for adaptive balancing (avoid list() every step)
+        self._cached_params = None
+
         # Adaptive loss balancing - only include losses with weight > 0
         loss_names = ["continuity", "poisson"]
         if loss_weights.get("ic", 0.0) > 0:
@@ -413,8 +419,7 @@ class BasePINN(pl.LightningModule):
     def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         """Training step with PDE losses. IC/BC only computed if weight > 0."""
         x_t = batch[0] if isinstance(batch, (list, tuple)) else batch
-        device = x_t.device
-        zero = torch.tensor(0.0, device=device)
+        zero = self._zero  # Use cached buffer (no GPU alloc)
 
         # PDE residuals (always computed - core physics)
         res_cont, res_pois = self.compute_pde_residuals(x_t)
@@ -445,25 +450,15 @@ class BasePINN(pl.LightningModule):
             if not self.exact_bc and bc_weight > 0:
                 losses["bc"] = loss_bc
 
-            params = list(self.parameters())
-            weights = self.loss_balancer.update(losses, params)
-
-            # Log adaptive weights
-            self.log("weight/continuity", weights.get("continuity", 1.0), on_step=False, on_epoch=True)
-            self.log("weight/poisson", weights.get("poisson", 1.0), on_step=False, on_epoch=True)
-            if ic_weight > 0:
-                self.log("weight/ic", weights.get("ic", 0.0), on_step=False, on_epoch=True)
-            if not self.exact_bc and bc_weight > 0:
-                self.log("weight/bc", weights.get("bc", 0.0), on_step=False, on_epoch=True)
-
-            # Log gradient norms for debugging
-            grad_norms = self.loss_balancer.get_grad_norms()
-            for name, norm in grad_norms.items():
-                self.log(f"grad_norm/{name}", norm, on_step=False, on_epoch=True)
+            # Use cached params (avoid list() every step)
+            if self._cached_params is None:
+                self._cached_params = list(self.parameters())
+            weights = self.loss_balancer.update(losses, self._cached_params)
+            # Note: weights/grad_norms logged in on_train_epoch_end to avoid per-step sync
         else:
             weights = self.loss_weights
 
-        # Total loss (only physics losses when IC/BC weights are 0)
+        # Total loss (weights may be tensors or floats)
         loss = (
             weights["continuity"] * loss_cont +
             weights["poisson"] * loss_pois
@@ -473,13 +468,13 @@ class BasePINN(pl.LightningModule):
         if not self.exact_bc and bc_weight > 0:
             loss = loss + weights["bc"] * loss_bc
 
-        # Metrics
+        # Metrics (update on GPU, no sync)
         self.train_metrics["loss_cont"].update(loss_cont)
         self.train_metrics["loss_pois"].update(loss_pois)
         self.train_metrics["loss_ic"].update(loss_ic)
         self.train_metrics["loss_bc"].update(loss_bc)
 
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log_dict(self.train_metrics, on_step=False, on_epoch=True)
 
         return loss
@@ -487,8 +482,7 @@ class BasePINN(pl.LightningModule):
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         """Validation step with PDE losses. IC/BC only computed if weight > 0."""
         x_t = batch[0] if isinstance(batch, (list, tuple)) else batch
-        device = x_t.device
-        zero = torch.tensor(0.0, device=device)
+        zero = self._zero  # Use cached buffer
 
         with torch.enable_grad():
             res_cont, res_pois = self.compute_pde_residuals(x_t)
@@ -533,8 +527,7 @@ class BasePINN(pl.LightningModule):
     def test_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         """Test step with PDE losses. IC/BC only computed if weight > 0."""
         x_t = batch[0] if isinstance(batch, (list, tuple)) else batch
-        device = x_t.device
-        zero = torch.tensor(0.0, device=device)
+        zero = self._zero  # Use cached buffer
 
         with torch.enable_grad():
             res_cont, res_pois = self.compute_pde_residuals(x_t)
@@ -621,14 +614,21 @@ class BasePINN(pl.LightningModule):
 
         return optimizer
 
-    def on_train_epoch_start(self):
-        """Disable GC during training epoch for consistent performance."""
-        gc.disable()
-
     def on_train_epoch_end(self):
-        """Re-enable GC and collect at epoch boundary."""
-        gc.enable()
-        gc.collect()
+        """Log adaptive weights at epoch end (single CPU sync per epoch)."""
+        # Log adaptive weights and grad norms
+        if self.loss_balancer is not None:
+            weights_for_log = self.loss_balancer.get_weights()
+            self.log("weight/continuity", weights_for_log.get("continuity", 1.0))
+            self.log("weight/poisson", weights_for_log.get("poisson", 1.0))
+            if self.loss_weights.get("ic", 0.0) > 0:
+                self.log("weight/ic", weights_for_log.get("ic", 0.0))
+            if not self.exact_bc and self.loss_weights.get("bc", 0.0) > 0:
+                self.log("weight/bc", weights_for_log.get("bc", 0.0))
+
+            grad_norms = self.loss_balancer.get_grad_norms()
+            for name, norm in grad_norms.items():
+                self.log(f"grad_norm/{name}", norm)
 
     def on_train_end(self):
         """Generate visualizations at end of training."""
