@@ -109,6 +109,29 @@ class ScalingParameters:
     n_ref: float = 1.0e14         # Reference density (m^-3)
     phi_ref: float = 40.0         # Reference potential (V) - typically V0
 
+
+@dataclass
+class FDMParameters:
+    """FDM solver resolution parameters for reference data generation"""
+    nx: int = 1024                      # Spatial mesh points
+    n_steps_per_cycle: int = 1400000    # Time steps per RF cycle
+    save_every: int = 100               # Save interval (reduces output size)
+
+    @classmethod
+    def benchmark(cls) -> "FDMParameters":
+        """Benchmark resolution matching colleague's best model"""
+        return cls(nx=1024, n_steps_per_cycle=1400000, save_every=100)
+
+    @classmethod
+    def medium(cls) -> "FDMParameters":
+        """Medium resolution for faster iteration"""
+        return cls(nx=256, n_steps_per_cycle=500000, save_every=10)
+
+    @classmethod
+    def low(cls) -> "FDMParameters":
+        """Low resolution for quick testing"""
+        return cls(nx=50, n_steps_per_cycle=100000, save_every=1)
+
     @classmethod
     def from_physics(cls, domain: DomainParameters, plasma: PlasmaParameters) -> "ScalingParameters":
         """Create scaling parameters from physics parameters"""
@@ -191,12 +214,14 @@ class ParameterSpace:
         domain: Optional[DomainParameters] = None,
         plasma: Optional[PlasmaParameters] = None,
         scales: Optional[ScalingParameters] = None,
-        constants: Optional[PhysicalConstants] = None
+        constants: Optional[PhysicalConstants] = None,
+        fdm: Optional[FDMParameters] = None
     ):
         self.constants = constants or PhysicalConstants()
         self.domain = domain or DomainParameters()
         self.plasma = plasma or PlasmaParameters()
         self.scales = scales or ScalingParameters()
+        self.fdm = fdm or FDMParameters.benchmark()
 
         # Link constants to plasma parameters
         object.__setattr__(self.plasma, '_constants', self.constants)
@@ -209,13 +234,18 @@ class ParameterSpace:
 
         physics_cfg = cfg.get('physics', cfg)  # Support nested or flat structure
 
+        # Load FDM parameters if present, otherwise use benchmark defaults
+        fdm_cfg = physics_cfg.get('fdm', {})
+        fdm = FDMParameters(**fdm_cfg) if fdm_cfg else FDMParameters.benchmark()
+
         return cls(
             domain=DomainParameters(**physics_cfg.get('domain', {})),
             plasma=PlasmaParameters(**{
                 k: v for k, v in physics_cfg.get('plasma', {}).items()
                 if k != '_constants'
             }),
-            scales=ScalingParameters(**physics_cfg.get('scales', {}))
+            scales=ScalingParameters(**physics_cfg.get('scales', {})),
+            fdm=fdm
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -248,6 +278,11 @@ class ParameterSpace:
                 't_ref': self.scales.t_ref,
                 'n_ref': self.scales.n_ref,
                 'phi_ref': self.scales.phi_ref,
+            },
+            'fdm': {
+                'nx': self.fdm.nx,
+                'n_steps_per_cycle': self.fdm.n_steps_per_cycle,
+                'save_every': self.fdm.save_every,
             }
         }
 
@@ -356,12 +391,16 @@ class ParameterSpace:
         Generate a unique hash based on physics parameters for FDM file naming.
 
         Args:
-            nx: Optional spatial resolution (included in hash if provided)
-            n_steps: Optional temporal steps per cycle (included in hash if provided)
+            nx: Spatial resolution (uses self.fdm.nx if None)
+            n_steps: Temporal steps per cycle (uses self.fdm.n_steps_per_cycle if None)
 
         Returns:
             8-character hash string identifying this parameter configuration
         """
+        # Use stored FDM config if not explicitly provided
+        nx = nx if nx is not None else self.fdm.nx
+        n_steps = n_steps if n_steps is not None else self.fdm.n_steps_per_cycle
+
         # Include all physics-relevant parameters that affect FDM solution
         key_params = (
             f"L={self.domain.L:.6e}_"
@@ -372,13 +411,10 @@ class ParameterSpace:
             f"R0={self.plasma.R0:.6e}_"
             f"Te={self.plasma.T_e_eV:.6e}_"
             f"mi={self.plasma.m_i_amu:.6e}_"
-            f"nu={self.plasma.nu_m:.6e}"
+            f"nu={self.plasma.nu_m:.6e}_"
+            f"nx={nx}_"
+            f"nt={n_steps}"
         )
-        # Include resolution in hash if provided
-        if nx is not None:
-            key_params += f"_nx={nx}"
-        if n_steps is not None:
-            key_params += f"_nt={n_steps}"
         return hashlib.md5(key_params.encode()).hexdigest()[:8]
 
     def get_fdm_filename(self, nx: int = None, n_steps: int = None) -> str:
@@ -386,8 +422,8 @@ class ParameterSpace:
         Generate FDM filename based on physics parameters and resolution.
 
         Args:
-            nx: Optional spatial resolution
-            n_steps: Optional temporal steps per cycle
+            nx: Spatial resolution (uses self.fdm.nx if None)
+            n_steps: Temporal steps per cycle (uses self.fdm.n_steps_per_cycle if None)
 
         Returns:
             Filename like 'fdm_a1b2c3d4.npz'

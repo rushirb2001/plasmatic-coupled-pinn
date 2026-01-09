@@ -15,7 +15,7 @@ from scipy.sparse.linalg import spsolve
 import torch
 from torch.utils.data import Dataset
 
-from ..utils.physics import ParameterSpace, PhysicalConstants
+from ..utils.physics import ParameterSpace, PhysicalConstants, FDMParameters
 
 
 @dataclass
@@ -27,6 +27,50 @@ class FDMConfig:
     save_every: int = 1               # Save interval (1 = save every step)
     enforce_positivity: bool = True   # Clamp negative densities to zero
     verbose: bool = True              # Print progress
+
+    @classmethod
+    def from_params(cls, fdm_params: FDMParameters) -> "FDMConfig":
+        """Create FDMConfig from FDMParameters in physics config"""
+        return cls(
+            nx=fdm_params.nx,
+            n_steps_per_cycle=fdm_params.n_steps_per_cycle,
+            save_every=fdm_params.save_every,
+            verbose=True
+        )
+
+    @classmethod
+    def low_res(cls) -> "FDMConfig":
+        """Low resolution config for quick testing (nx=50, 100k steps)"""
+        return cls(nx=50, n_steps_per_cycle=100000, save_every=1)
+
+    @classmethod
+    def medium_res(cls) -> "FDMConfig":
+        """Medium resolution config (nx=256, 500k steps)"""
+        return cls(nx=256, n_steps_per_cycle=500000, save_every=10)
+
+    @classmethod
+    def high_res(cls) -> "FDMConfig":
+        """
+        High resolution config matching benchmark (nx=1024, 1.4M steps).
+
+        WARNING: This generates ~2-3GB files and takes hours to compute.
+        Use save_every=100 to reduce output to ~14k snapshots.
+        """
+        return cls(nx=1024, n_steps_per_cycle=1400000, save_every=100)
+
+    @classmethod
+    def benchmark(cls) -> "FDMConfig":
+        """
+        Benchmark resolution config (nx=1024, 1.4M steps, save_every=100).
+
+        Matches colleague's best model resolution:
+        - 1024 spatial points
+        - 1,400,000 time steps per RF cycle
+        - Saves every 100 steps -> 14,000 snapshots
+
+        WARNING: Takes several hours to generate.
+        """
+        return cls(nx=1024, n_steps_per_cycle=1400000, save_every=100, verbose=True)
 
 
 class FDMSolver:
@@ -409,8 +453,8 @@ def get_or_generate_fdm(
     Otherwise, generates and saves it.
 
     Args:
-        params: Physics parameters
-        config: FDM solver configuration (uses defaults if None)
+        params: Physics parameters (includes FDM resolution in params.fdm)
+        config: FDM solver configuration (uses params.fdm if None)
         fdm_dir: Directory to store FDM data files
         force_regenerate: If True, regenerate even if file exists
         validate: If True, validate embedded params match expected (default True)
@@ -422,11 +466,16 @@ def get_or_generate_fdm(
             - t: Time array (nt,)
             - x: Spatial array (nx,)
     """
+    # Use resolution from params.fdm if no explicit config provided
+    config = config or FDMConfig.from_params(params.fdm)
+
     fdm_dir = Path(fdm_dir)
     fdm_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate unique filename based on physics parameters
-    fdm_path = fdm_dir / params.get_fdm_filename()
+    # Generate unique filename based on physics parameters AND resolution
+    fdm_path = fdm_dir / params.get_fdm_filename(
+        nx=config.nx, n_steps=config.n_steps_per_cycle
+    )
 
     if fdm_path.exists() and not force_regenerate:
         print(f"Loading existing FDM data from {fdm_path}")
@@ -455,8 +504,9 @@ def get_or_generate_fdm(
             return FDMSolver.load(str(fdm_path))
 
     # Generate FDM data
-    print(f"Generating FDM reference data for parameters: {params.get_fdm_hash()}")
-    config = config or FDMConfig()
+    print(f"Generating FDM reference data (nx={config.nx}, steps={config.n_steps_per_cycle})")
+    print(f"  Parameters hash: {params.get_fdm_hash(config.nx, config.n_steps_per_cycle)}")
+    print(f"  WARNING: Benchmark resolution takes several hours to generate!")
     solver = FDMSolver(params, config)
     ne, phi, t = solver.solve()
 
@@ -469,6 +519,7 @@ def get_or_generate_fdm(
 def get_fdm_for_visualization(
     params: ParameterSpace,
     fdm_dir: str = "data/fdm",
+    config: Optional[FDMConfig] = None,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     """
     Get FDM data for visualization, transposed to [Nx, Nt] format.
@@ -476,14 +527,18 @@ def get_fdm_for_visualization(
     Only loads existing data - does not generate if missing.
 
     Args:
-        params: Physics parameters
+        params: Physics parameters (includes FDM resolution in params.fdm)
         fdm_dir: Directory containing FDM data files
+        config: FDM config for filename resolution (uses params.fdm if None)
 
     Returns:
         Tuple of (ref_n_e, ref_phi, ref_x, ref_t) with arrays transposed for
         visualization [Nx, Nt], or None if data doesn't exist
     """
+    # Use resolution from params.fdm if no explicit config provided
+    config = config or FDMConfig.from_params(params.fdm)
     fdm_dir = Path(fdm_dir)
+    # Use params.get_fdm_filename() which uses params.fdm internally
     fdm_path = fdm_dir / params.get_fdm_filename()
 
     if not fdm_path.exists():

@@ -41,7 +41,7 @@ data:
 
 # Trainer configuration
 trainer:
-  max_epochs: 1000
+  max_epochs: 10000
   accelerator: auto
   devices: 1
   precision: 32
