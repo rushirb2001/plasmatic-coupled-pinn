@@ -41,7 +41,14 @@ from src.architectures import (
 )
 from src.utils.physics import ParameterSpace, PhysicalConstants, AdaptiveScalingParameters
 from src.utils.nondim import NonDimensionalizer, AdaptiveNonDimensionalizer
-from src.utils.gradients import AdaptiveLossBalancer, GradientMonitor
+from src.utils.gradients import (
+    AdaptiveLossBalancer,
+    GradientMonitor,
+    ResidualNormalizer,
+    PCGrad,
+    BalancingStrategy,
+    ResidualNormStrategy,
+)
 from src.data.fdm_solver import get_or_generate_fdm
 from src.visualization.plotting import visualize_model
 
@@ -68,6 +75,16 @@ class BasePINN(pl.LightningModule):
         scheduler: Scheduler type ('constant', 'cosine', 'step')
         loss_weights: Dictionary of loss component weights
         params_path: Path to physics parameters YAML (optional)
+        use_adaptive_weights: Enable adaptive loss balancing
+        adaptive_alpha: EMA smoothing for adaptive weights (lower = more stable)
+        balancing_strategy: Strategy for adaptive weights ('max', 'mean', 'rms', 'softmax')
+        max_weight: Maximum allowed adaptive weight (default 100)
+        min_weight: Minimum allowed adaptive weight (default 0.01)
+        normalize_residuals: Enable residual normalization
+        residual_norm_strategy: Strategy for residual normalization
+            ('none', 'ema', 'char_scale', 'running_stats', 'batch_norm')
+        residual_ema_decay: EMA decay for residual normalization (default 0.99)
+        use_pcgrad: Enable PCGrad gradient surgery for conflicting gradients
         smooth_reaction_zone: Use smooth sigmoid transitions at reaction zone boundaries
         reaction_sharpness: Sharpness of sigmoid transition (higher = sharper, default 100)
     """
@@ -85,6 +102,13 @@ class BasePINN(pl.LightningModule):
         params_path: Optional[str] = None,
         use_adaptive_weights: bool = False,
         adaptive_alpha: float = 0.1,
+        balancing_strategy: str = "mean",  # max, mean, rms, softmax
+        max_weight: float = 100.0,
+        min_weight: float = 0.01,
+        normalize_residuals: bool = False,
+        residual_norm_strategy: str = "ema",  # none, ema, char_scale, running_stats, batch_norm
+        residual_ema_decay: float = 0.99,
+        use_pcgrad: bool = False,
         exact_bc: bool = True,
         ic_num_points: int = 10000,
         visualize_on_train_end: bool = True,
@@ -118,6 +142,13 @@ class BasePINN(pl.LightningModule):
         self.weight_decay = weight_decay
         self.loss_weights = loss_weights
         self.use_adaptive_weights = use_adaptive_weights
+        self.balancing_strategy = balancing_strategy
+        self.max_weight = max_weight
+        self.min_weight = min_weight
+        self.normalize_residuals = normalize_residuals
+        self.residual_norm_strategy = residual_norm_strategy
+        self.residual_ema_decay = residual_ema_decay
+        self.use_pcgrad = use_pcgrad
         self.exact_bc = exact_bc
         self.ic_num_points = ic_num_points
         self.visualize_on_train_end = visualize_on_train_end
@@ -162,9 +193,41 @@ class BasePINN(pl.LightningModule):
                 alpha=adaptive_alpha,
                 loss_names=loss_names,
                 initial_weights=loss_weights,
+                strategy=balancing_strategy,
+                max_weight=max_weight,
+                min_weight=min_weight,
             )
         else:
             self.loss_balancer = None
+
+        # Residual normalizer (modular)
+        if normalize_residuals:
+            # Get characteristic scales from physics (if available)
+            # AdaptiveNonDimensionalizer has these, base NonDimensionalizer doesn't
+            if hasattr(self.nondim, 'cont_char_scale'):
+                char_scales = {
+                    "continuity": self.nondim.cont_char_scale,
+                    "poisson": self.nondim.pois_char_scale,
+                }
+            else:
+                # Fallback: use coefficient magnitudes
+                char_scales = {
+                    "continuity": max(abs(self.nondim.coeffs.alpha), abs(self.nondim.coeffs.beta), 1.0),
+                    "poisson": abs(self.nondim.coeffs.delta),
+                }
+            self.residual_normalizer = ResidualNormalizer(
+                strategy=residual_norm_strategy,
+                ema_decay=residual_ema_decay,
+                char_scales=char_scales,
+            )
+        else:
+            self.residual_normalizer = None
+
+        # PCGrad for gradient surgery (handles conflicting gradients)
+        if use_pcgrad:
+            self.pcgrad = PCGrad(reduction="sum")
+        else:
+            self.pcgrad = None
 
         # Gradient monitoring
         self.grad_monitor = GradientMonitor()
@@ -423,6 +486,12 @@ class BasePINN(pl.LightningModule):
 
         # PDE residuals (always computed - core physics)
         res_cont, res_pois = self.compute_pde_residuals(x_t)
+
+        # Apply residual normalization if enabled (modular)
+        if self.residual_normalizer is not None:
+            res_cont = self.residual_normalizer.normalize(res_cont, "continuity", training=True)
+            res_pois = self.residual_normalizer.normalize(res_pois, "poisson", training=True)
+
         loss_cont = torch.mean(res_cont**2)
         loss_pois = torch.mean(res_pois**2)
 
@@ -754,9 +823,10 @@ class AdaptiveSequentialPeriodicPINN(SequentialPeriodicPINN):
     that fail with fixed scaling parameters.
 
     Args:
-        normalize_residuals: If True, normalizes PDE residuals by characteristic scales
-        use_ema_normalization: If True, uses EMA of residual RMS instead of fixed scales
+        normalize_residuals: If True, normalizes PDE residuals (uses base class ResidualNormalizer)
+        use_ema_normalization: If True, uses EMA strategy; if False, uses char_scale strategy
         ema_decay: Decay factor for EMA (default 0.99)
+        residual_norm_strategy: Override strategy (none, ema, char_scale, running_stats, batch_norm)
         **kwargs: All arguments from SequentialPeriodicPINN
     """
 
@@ -767,19 +837,36 @@ class AdaptiveSequentialPeriodicPINN(SequentialPeriodicPINN):
         ema_decay: float = 0.99,
         **kwargs: Any
     ):
-        self.normalize_residuals = normalize_residuals
-        self.use_ema_normalization = use_ema_normalization
-        self.ema_decay = ema_decay
+        # Map old parameters to new modular system
+        # Determine residual_norm_strategy from old parameters
+        if normalize_residuals:
+            if use_ema_normalization:
+                residual_strategy = "ema"
+            else:
+                residual_strategy = "char_scale"
+        else:
+            residual_strategy = "none"
+
+        # Pass to base class via kwargs (it will set up ResidualNormalizer)
+        kwargs['normalize_residuals'] = normalize_residuals
+        kwargs['residual_norm_strategy'] = residual_strategy
+        kwargs['residual_ema_decay'] = ema_decay
+
+        # Store for backward compat logging
+        self._use_ema_normalization = use_ema_normalization
+        self._ema_decay = ema_decay
+
         super().__init__(**kwargs)
 
         # Replace standard scaling with adaptive scaling
         self._setup_adaptive_scaling()
 
-        # EMA buffers for residual RMS (initialized from characteristic scales)
-        if self.use_ema_normalization:
-            scales = self.nondim.get_residual_scales()
-            self.register_buffer('_ema_cont_rms', torch.tensor(scales['continuity']))
-            self.register_buffer('_ema_pois_rms', torch.tensor(scales['poisson']))
+        # Update ResidualNormalizer char_scales with adaptive nondim values
+        if self.residual_normalizer is not None:
+            self.residual_normalizer.set_characteristic_scales({
+                "continuity": self.nondim.cont_char_scale,
+                "poisson": self.nondim.pois_char_scale,
+            })
 
     def _setup_adaptive_scaling(self):
         """Set up adaptive scaling parameters based on physics."""
@@ -825,47 +912,15 @@ class AdaptiveSequentialPeriodicPINN(SequentialPeriodicPINN):
         print(f"  pois_char_scale    = {coeff_dict['pois_char_scale']:.4e}")
         print(f"---")
         print(f"  normalize_residuals = {self.normalize_residuals}")
-        print(f"  use_ema_normalization = {self.use_ema_normalization}")
-        if hasattr(self, '_ema_cont_rms'):
-            print(f"  EMA buffers initialized: YES")
-            print(f"  _ema_cont_rms (init) = {self._ema_cont_rms.item():.4e}")
-            print(f"  _ema_pois_rms (init) = {self._ema_pois_rms.item():.4e}")
-        else:
-            print(f"  EMA buffers initialized: NO")
+        print(f"  residual_norm_strategy = {self.residual_norm_strategy}")
+        if self.residual_normalizer is not None:
+            scales = self.residual_normalizer.get_scales()
+            for key, val in scales.items():
+                print(f"  {key} = {val:.4e}")
         print(f"{'='*60}\n")
 
-    def compute_pde_residuals(
-        self, x_t: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute PDE residuals with optional normalization.
-
-        If normalize_residuals=True:
-        - use_ema_normalization=False: divides by fixed characteristic scales
-        - use_ema_normalization=True: divides by EMA of residual RMS (adaptive)
-        """
-        res_cont, res_pois = super().compute_pde_residuals(x_t)
-
-        if self.normalize_residuals:
-            if self.use_ema_normalization and hasattr(self, '_ema_cont_rms'):
-                # Update EMA of residual RMS during training
-                if self.training:
-                    with torch.no_grad():
-                        cont_rms = torch.sqrt(torch.mean(res_cont ** 2) + 1e-10)
-                        pois_rms = torch.sqrt(torch.mean(res_pois ** 2) + 1e-10)
-                        self._ema_cont_rms = self.ema_decay * self._ema_cont_rms + (1 - self.ema_decay) * cont_rms
-                        self._ema_pois_rms = self.ema_decay * self._ema_pois_rms + (1 - self.ema_decay) * pois_rms
-
-                # Normalize by EMA (use detached values to avoid gradient through normalization)
-                res_cont = res_cont / (self._ema_cont_rms.detach() + 1e-10)
-                res_pois = res_pois / (self._ema_pois_rms.detach() + 1e-10)
-            else:
-                # Use fixed characteristic scales
-                scales = self.nondim.get_residual_scales()
-                res_cont = res_cont / scales['continuity']
-                res_pois = res_pois / scales['poisson']
-
-        return res_cont, res_pois
+    # Note: compute_pde_residuals no longer needs override - normalization
+    # is handled by ResidualNormalizer in BasePINN.training_step()
 
 
 class GatedPINN(BasePINN):

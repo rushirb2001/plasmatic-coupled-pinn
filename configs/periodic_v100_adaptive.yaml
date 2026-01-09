@@ -22,10 +22,11 @@ model:
     smooth_reaction_zone: true
     reaction_sharpness: 100.0
 
-    # Residual normalization
+    # Residual normalization (modular)
+    # Strategies: none, ema, char_scale, running_stats, batch_norm
     normalize_residuals: true
-    use_ema_normalization: true
-    ema_decay: 0.99
+    use_ema_normalization: true  # Maps to residual_norm_strategy: ema
+    ema_decay: 0.99  # Slow decay = stable (0.99 = 99% old + 1% new)
 
     # Optimization
     learning_rate: 1e-4
@@ -33,14 +34,22 @@ model:
     scheduler: constant
     weight_decay: 0.0
 
-    # Loss
+    # Loss balancing (modular)
     loss_weights:
       continuity: 1.0
       poisson: 1.0
       bc: 10.0
       ic: 0.0
+    # Adaptive loss balancing
+    # Strategies: max, mean, rms, softmax
     use_adaptive_weights: true
-    adaptive_alpha: 0.9
+    adaptive_alpha: 0.1  # Slow EMA = stable (0.1 = 90% old + 10% new)
+    balancing_strategy: mean  # More stable than max
+    max_weight: 100.0  # Cap to prevent explosion
+    min_weight: 0.01   # Floor to prevent collapse
+
+    # Gradient surgery (optional - for conflicting gradients)
+    use_pcgrad: false
 
     # Output
     visualize_on_train_end: true
