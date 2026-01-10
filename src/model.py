@@ -745,10 +745,7 @@ class BasePINN(pl.LightningModule):
         # Trigger resampling in DataModule to prevent overfitting to fixed points
         dm = getattr(self.trainer, "datamodule", None)
         if dm is not None and hasattr(dm, "resample_train"):
-            resampled = dm.resample_train()
-            # Log occasionally to confirm resampling is happening
-            if resampled and self.current_epoch % 100 == 0:
-                print(f"[Epoch {self.current_epoch}] Resampled collocation points")
+            dm.resample_train()
 
     def on_train_epoch_end(self):
         """Log adaptive weights at epoch end (single CPU sync per epoch)."""
@@ -768,6 +765,17 @@ class BasePINN(pl.LightningModule):
 
     def on_train_end(self):
         """Generate visualizations at end of training."""
+        self._run_visualization()
+
+    def on_exception(self, trainer, pl_module, exception):
+        """Handle exceptions (including KeyboardInterrupt) gracefully."""
+        if isinstance(exception, KeyboardInterrupt):
+            print(f"\n[Epoch {self.current_epoch}] Training interrupted by user. Generating visualizations...")
+            self._run_visualization()
+            print("Visualization complete. Exiting gracefully.")
+
+    def _run_visualization(self):
+        """Generate visualizations (called from on_train_end or on_exception)."""
         if not self.visualize_on_train_end:
             return
 
