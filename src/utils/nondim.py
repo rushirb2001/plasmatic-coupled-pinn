@@ -147,15 +147,17 @@ class NonDimensionalizer:
         Compute normalized driving voltage at dimensionless time t'.
 
         V(t) = V0 * sin(2*pi*f*t)
-        V'(t') = sin(2*pi*t')  (since t' = t * f)
+        V'(t') = (V0/phi_ref) * sin(2*pi*t')  (since t' = t * f)
 
-        Returns: phi' = V/phi_ref = (V0/phi_ref) * sin(2*pi*t')
+        Returns: phi' = V/phi_ref = amplitude * sin(2*pi*t')
+
+        NOTE: This correctly handles cases where V0 != phi_ref.
         """
-        # With standard scaling, V0 = phi_ref, so this simplifies
+        amp = self.params.plasma.V0 / self.params.scales.phi_ref
         if isinstance(t_dim, torch.Tensor):
-            return torch.sin(2 * 3.141592653589793 * t_dim)
+            return amp * torch.sin(2 * 3.141592653589793 * t_dim)
         else:
-            return np.sin(2 * 3.141592653589793 * t_dim)
+            return amp * np.sin(2 * 3.141592653589793 * t_dim)
 
     def __repr__(self) -> str:
         return (
@@ -202,13 +204,14 @@ class AdaptiveNonDimensionalizer(NonDimensionalizer):
         c = self.coeffs
 
         # Continuity characteristic scale: max magnitude of coefficients
+        # IMPORTANT: Include 1.0 for dn_e/dt term (coefficient = 1 in nondimensional form)
         # IMPORTANT: gamma * R0 is the actual source term magnitude (R0 is physical value)
         gamma_R0 = abs(c.gamma * self.params.plasma.R0)
-        self.cont_char_scale = max(abs(c.alpha), abs(c.beta), gamma_R0, 1e-10)
+        self.cont_char_scale = max(1.0, abs(c.alpha), abs(c.beta), gamma_R0, 1e-10)
 
         # Poisson characteristic scale
         # With adaptive scaling, n_io = 1.0, so (n_e - n_io) is O(1) when n_e ~ 1
-        self.pois_char_scale = max(abs(c.delta), 1.0, 1e-10)
+        self.pois_char_scale = max(1.0, abs(c.delta), 1e-10)
 
     def get_residual_scales(self) -> dict:
         """

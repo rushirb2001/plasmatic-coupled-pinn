@@ -1,5 +1,6 @@
 # Stable Periodic PINN for V0=40V regime
 # Uses ONLY residual normalization (no adaptive weights) to avoid double-balancing
+# IC/BC now compatible (IC excludes boundaries with tapering weight)
 # Usage: python -m src.trainer fit --config configs/periodic_v40_stable.yaml
 
 # Experiment settings
@@ -23,25 +24,25 @@ model:
     smooth_reaction_zone: true
     reaction_sharpness: 100.0
 
-    # Residual normalization ONLY (no adaptive weights)
-    # This avoids double-balancing oscillations
+    # Residual normalization with characteristic scale (physics-based)
+    # use_ema_normalization: false → uses char_scale strategy
+    # This is more stable than EMA and doesn't require tuning decay rate
     normalize_residuals: true
-    use_ema_normalization: true
-    ema_decay: 0.995  # Very slow decay for stability
+    use_ema_normalization: false
 
-    # Optimization
+    # Optimization: Adam without weight decay (calmer for PINNs)
     learning_rate: 1e-4
     optimizer: adam
     scheduler: constant
     weight_decay: 0.0
 
     # Fixed loss weights (no adaptive balancing)
-    # Poisson weight increased to compensate for large delta coefficient
+    # IC now enabled since compute_ic_loss excludes boundaries
     loss_weights:
       continuity: 1.0
       poisson: 4.0
       bc: 10.0
-      ic: 0.0
+      ic: 1.0
 
     # Disable adaptive weights to prevent double-balancing
     use_adaptive_weights: false
@@ -70,6 +71,7 @@ trainer:
   devices: 1
   precision: 32
   gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
   log_every_n_steps: 10
   check_val_every_n_epoch: 10
   enable_progress_bar: true

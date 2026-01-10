@@ -211,9 +211,12 @@ class BasePINN(pl.LightningModule):
                 }
             else:
                 # Fallback: use coefficient magnitudes
+                # Include 1.0 for dn_e/dt (continuity) and d2phi/dx2 (poisson)
+                # Include gamma*R0 for source term in continuity
+                gamma_R0 = abs(self.nondim.coeffs.gamma * self.params.plasma.R0)
                 char_scales = {
-                    "continuity": max(abs(self.nondim.coeffs.alpha), abs(self.nondim.coeffs.beta), 1.0),
-                    "poisson": abs(self.nondim.coeffs.delta),
+                    "continuity": max(1.0, abs(self.nondim.coeffs.alpha), abs(self.nondim.coeffs.beta), gamma_R0),
+                    "poisson": max(1.0, abs(self.nondim.coeffs.delta)),
                 }
             self.residual_normalizer = ResidualNormalizer(
                 strategy=residual_norm_strategy,
@@ -406,8 +409,9 @@ class BasePINN(pl.LightningModule):
         x_t_right = torch.cat([x1, t], dim=1)
         n_e_L, phi_L = self(x_t_right)
 
-        # Driving voltage (normalized): phi(1,t) = sin(2*pi*t)
-        V_t = torch.sin(2 * math.pi * t)
+        # Driving voltage (normalized): phi(1,t) = (V0/phi_ref) * sin(2*pi*t)
+        # Uses nondim to correctly handle V0 != phi_ref cases
+        V_t = self.nondim.compute_normalized_voltage(t)
 
         # phi(1,t) = V(t), n_e(1,t) = 0
         loss_right = torch.mean(n_e_L**2) + torch.mean((phi_L - V_t)**2)
@@ -420,14 +424,24 @@ class BasePINN(pl.LightningModule):
 
         IC: n_e(x, t=0) = n_io (quasi-neutrality at t=0)
 
-        Uses a fixed set of spatial points at t=0 to enforce the initial condition.
+        IMPORTANT: Excludes boundary points (x=0, x=1) because:
+        - BC enforces n_e(0,t) = n_e(1,t) = 0 (electrodes absorb electrons)
+        - IC enforces n_e(x,0) = n_io > 0 (quasi-neutrality)
+        - These are incompatible at corners (0,0) and (1,0)
+
+        Uses tapering weight w = 4*x*(1-x) to smoothly transition near boundaries.
         """
         device = next(self.parameters()).device
 
-        # Sample spatial points at t=0
-        x = torch.linspace(0, 1, self.ic_num_points, device=device, dtype=torch.float32)
+        # Sample INTERIOR spatial points only (exclude boundaries)
+        # Using random sampling for better coverage
+        eps = 1e-2  # Small margin to avoid boundary
+        x = torch.rand(self.ic_num_points, device=device, dtype=torch.float32)
+        x = x * (1.0 - 2 * eps) + eps  # Map to [eps, 1-eps]
+        x = x.view(-1, 1)
+
         t0 = torch.zeros_like(x)
-        x_t0 = torch.stack([x, t0], dim=1)
+        x_t0 = torch.cat([x, t0], dim=1)
 
         # Forward pass at t=0
         n_e_0, _ = self(x_t0)
@@ -435,8 +449,10 @@ class BasePINN(pl.LightningModule):
         # Ion density (normalized) - computed from Boltzmann relation
         n_io = self.params.compute_n_io()
 
-        # IC residual: n_e(x, t=0) - n_io = 0
-        res_ic = n_e_0 - n_io
+        # IC residual with tapering weight near boundaries
+        # w = 4*x*(1-x): peaks at 1.0 in center, tapers to 0 at boundaries
+        w = 4.0 * x * (1.0 - x)
+        res_ic = w * (n_e_0 - n_io)
         loss_ic = torch.mean(res_ic**2)
 
         return loss_ic
@@ -447,10 +463,13 @@ class BasePINN(pl.LightningModule):
         learning_rate: float = 1e-3,
     ) -> None:
         """
-        Pretrain the network to satisfy the initial condition.
+        Pretrain the network to satisfy the initial condition at t=0.
 
         This optional pretraining phase helps the network start with
-        a physically consistent initial state (n_e = n_io everywhere).
+        a physically consistent initial state: n_e(x, t=0) = n_io in the interior.
+
+        IMPORTANT: Only trains at t=0 and excludes boundaries (x=0, x=1) to
+        maintain IC/BC compatibility. Uses tapering weight near boundaries.
 
         Args:
             num_steps: Number of pretraining optimization steps
@@ -459,20 +478,25 @@ class BasePINN(pl.LightningModule):
         device = next(self.parameters()).device
         optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
 
-        # Generate pretraining points covering full domain at all times
-        # (we want the network to predict n_io everywhere initially)
-        n_points = self.ic_num_points
-        x = torch.rand(n_points, device=device)
-        t = torch.rand(n_points, device=device)
-        x_t = torch.stack([x, t], dim=1)
-
         n_io = self.params.compute_n_io()
 
         self.train()
         for step in range(num_steps):
+            # Generate INTERIOR points at t=0 only (fresh batch each step)
+            n_points = self.ic_num_points
+            eps = 1e-2
+            x = torch.rand(n_points, device=device)
+            x = x * (1.0 - 2 * eps) + eps  # Map to [eps, 1-eps]
+            x = x.view(-1, 1)
+            t = torch.zeros_like(x)  # t=0 ONLY
+            x_t = torch.cat([x, t], dim=1)
+
+            # Tapering weight near boundaries
+            w = 4.0 * x * (1.0 - x)
+
             optimizer.zero_grad()
             n_e, _ = self(x_t)
-            loss = torch.mean((n_e - n_io)**2)
+            loss = torch.mean((w * (n_e - n_io))**2)
             loss.backward()
             optimizer.step()
 
