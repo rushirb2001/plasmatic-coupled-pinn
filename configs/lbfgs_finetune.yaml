@@ -1,0 +1,88 @@
+# LBFGS Fine-Tuning Configuration for CCP-II PINN
+# Two-stage training: Adam (10K) -> LBFGS (6K) for <1% L2 error
+#
+# Usage:
+#   python -m src.trainer fit \
+#       --config configs/lbfgs_finetune.yaml \
+#       --ckpt_path experiments/<experiment_name>/checkpoints/last.ckpt
+#
+# Example:
+#   python -m src.trainer fit \
+#       --config configs/lbfgs_finetune.yaml \
+#       --ckpt_path experiments/AdaptiveSequentialPeriodicPINN_uniform_1e-04_abc123/checkpoints/last.ckpt
+
+# Experiment settings
+auto_name: true
+output_dir: ./experiments
+
+# Model configuration (must match checkpoint architecture)
+model:
+  class_path: src.model.AdaptiveSequentialPeriodicPINN
+  init_args:
+    # Architecture (must match Adam checkpoint)
+    hidden_layers: [256, 256, 256]
+    activation: tanh
+    num_ffm_frequencies: 2
+    max_t_harmonic: 4
+    exact_bc: true
+    use_exp_ne: true
+
+    # Physics
+    params_path: configs/physics/v40.yaml
+    smooth_reaction_zone: true
+    reaction_sharpness: 100.0
+
+    # Residual normalization (same as Adam phase)
+    normalize_residuals: true
+    use_ema_normalization: false
+
+    # LBFGS optimizer settings
+    # lr=1.0 is standard for LBFGS (line search adjusts effective step)
+    optimizer: lbfgs
+    learning_rate: 1.0
+    scheduler: constant
+    weight_decay: 0.0
+
+    # Fixed loss weights (same as Adam phase)
+    loss_weights:
+      continuity: 1.0
+      poisson: 4.0
+      bc: 0.0
+      ic: 1.0
+
+    # No adaptive weights (same as Adam phase)
+    use_adaptive_weights: false
+    use_pcgrad: false
+
+    # Output
+    visualize_on_train_end: true
+
+# Data configuration - FULL BATCH for LBFGS
+# LBFGS works best with full batch (no mini-batching)
+data:
+  batch_size: 50000
+  num_points: 50000
+  sampler_type: uniform
+  x_range: [0.0, 1.0]
+  t_range: [0.0, 1.0]
+  clamp_x: true
+  val_grid_size: 100
+  num_workers: 0
+
+# Trainer configuration
+trainer:
+  max_epochs: 6000
+  accelerator: auto
+  devices: 1
+  precision: 32
+  # LBFGS handles step size internally via line search
+  gradient_clip_val: null
+  gradient_clip_algorithm: null
+  log_every_n_steps: 100
+  check_val_every_n_epoch: 100
+  enable_progress_bar: true
+  enable_model_summary: true
+
+# Logging
+use_wandb: false
+wandb_project: pinn-ccp2-lbfgs
