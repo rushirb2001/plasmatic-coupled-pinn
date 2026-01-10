@@ -109,6 +109,24 @@ class ScalingParameters:
     n_ref: float = 1.0e14         # Reference density (m^-3)
     phi_ref: float = 40.0         # Reference potential (V) - typically V0
 
+    @classmethod
+    def from_physics(cls, domain: "DomainParameters", plasma: "PlasmaParameters") -> "ScalingParameters":
+        """
+        Create scaling parameters derived from physics parameters.
+
+        This ensures scales are consistent with the physics:
+        - x_ref = L (domain length)
+        - t_ref = 1/f (RF period)
+        - phi_ref = V0 (voltage amplitude)
+        - n_ref kept at default (or use AdaptiveScalingParameters for n_ref = n_io)
+        """
+        return cls(
+            x_ref=domain.L,
+            t_ref=1.0 / plasma.f,
+            n_ref=cls().n_ref,  # Keep default n_ref
+            phi_ref=plasma.V0,
+        )
+
 
 @dataclass
 class FDMParameters:
@@ -131,16 +149,6 @@ class FDMParameters:
     def low(cls) -> "FDMParameters":
         """Low resolution for quick testing"""
         return cls(nx=50, n_steps_per_cycle=100000, save_every=1)
-
-    @classmethod
-    def from_physics(cls, domain: DomainParameters, plasma: PlasmaParameters) -> "ScalingParameters":
-        """Create scaling parameters from physics parameters"""
-        return cls(
-            x_ref=domain.L,
-            t_ref=1.0 / plasma.f,
-            n_ref=1.0e16,  # Typical plasma density
-            phi_ref=plasma.V0
-        )
 
 
 @dataclass
@@ -290,6 +298,10 @@ class ParameterSpace:
         """
         Create new ParameterSpace with specific parameter overrides.
 
+        IMPORTANT: If domain or plasma parameters are changed, scales are
+        automatically recomputed to stay consistent (unless scales are
+        explicitly overridden).
+
         Args:
             **overrides: Dot-notation parameter overrides, e.g.:
                 - plasma.V0=150
@@ -304,6 +316,8 @@ class ParameterSpace:
         new_plasma = copy.copy(self.plasma)
         new_scales = copy.copy(self.scales)
 
+        scales_explicitly_overridden = False
+
         for key, value in overrides.items():
             parts = key.split('.')
             if len(parts) == 2:
@@ -314,8 +328,14 @@ class ParameterSpace:
                     setattr(new_plasma, param, value)
                 elif category == 'scales':
                     setattr(new_scales, param, value)
+                    scales_explicitly_overridden = True
             else:
                 raise ValueError(f"Invalid override key: {key}. Use 'category.param' format.")
+
+        # Recompute scales from physics unless explicitly overridden
+        # This prevents inconsistent nondimensionalization when physics change
+        if not scales_explicitly_overridden:
+            new_scales = ScalingParameters.from_physics(new_domain, new_plasma)
 
         return ParameterSpace(
             domain=new_domain,

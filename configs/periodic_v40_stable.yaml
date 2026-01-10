@@ -1,0 +1,80 @@
+# Stable Periodic PINN for V0=40V regime
+# Uses ONLY residual normalization (no adaptive weights) to avoid double-balancing
+# Usage: python -m src.trainer fit --config configs/periodic_v40_stable.yaml
+
+# Experiment settings
+auto_name: true
+output_dir: ./experiments
+
+# Model configuration
+model:
+  class_path: src.model.AdaptiveSequentialPeriodicPINN
+  init_args:
+    # Architecture
+    hidden_layers: [256, 256, 256]
+    activation: tanh
+    num_ffm_frequencies: 2
+    max_t_harmonic: 4
+    exact_bc: true
+    use_exp_ne: true
+
+    # Physics
+    params_path: configs/physics/v40.yaml
+    smooth_reaction_zone: true
+    reaction_sharpness: 100.0
+
+    # Residual normalization ONLY (no adaptive weights)
+    # This avoids double-balancing oscillations
+    normalize_residuals: true
+    use_ema_normalization: true
+    ema_decay: 0.995  # Very slow decay for stability
+
+    # Optimization
+    learning_rate: 1e-4
+    optimizer: adam
+    scheduler: constant
+    weight_decay: 0.0
+
+    # Fixed loss weights (no adaptive balancing)
+    # Poisson weight increased to compensate for large delta coefficient
+    loss_weights:
+      continuity: 1.0
+      poisson: 4.0
+      bc: 10.0
+      ic: 0.0
+
+    # Disable adaptive weights to prevent double-balancing
+    use_adaptive_weights: false
+
+    # Gradient surgery disabled (optional for later testing)
+    use_pcgrad: false
+
+    # Output
+    visualize_on_train_end: true
+
+# Data configuration
+data:
+  batch_size: 10000
+  num_points: 10000
+  sampler_type: uniform
+  x_range: [0.0, 1.0]
+  t_range: [0.0, 1.0]
+  clamp_x: false
+  val_grid_size: 100
+  num_workers: 0
+
+# Trainer configuration
+trainer:
+  max_epochs: 10000
+  accelerator: auto
+  devices: 1
+  precision: 32
+  gradient_clip_val: 1.0
+  log_every_n_steps: 10
+  check_val_every_n_epoch: 10
+  enable_progress_bar: true
+  enable_model_summary: true
+
+# Logging
+use_wandb: false
+wandb_project: pinn-ccp2-stable

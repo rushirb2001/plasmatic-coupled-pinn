@@ -235,15 +235,19 @@ class AdaptiveLossBalancer:
         # Track weight history for debugging
         self.weight_history: Dict[str, List[float]] = {name: [] for name in loss_names}
 
-    def _flatten_grads(self, grads: Tuple) -> torch.Tensor:
+    def _flatten_grads(self, grads: Tuple, device: Optional[torch.device] = None) -> torch.Tensor:
         """Flatten gradient tensors into a single 1D tensor."""
         flat_grads = []
         for g in grads:
             if g is not None:
                 flat_grads.append(g.flatten())
+                if device is None:
+                    device = g.device
         if flat_grads:
             return torch.cat(flat_grads)
-        return torch.tensor([0.0])
+        # Return zero tensor on correct device to avoid GPU/CPU mismatch
+        device = device or torch.device("cpu")
+        return torch.zeros(1, device=device)
 
     def _mean_abs_norm(
         self,
@@ -255,7 +259,9 @@ class AdaptiveLossBalancer:
             loss, params, retain_graph=True, create_graph=False, allow_unused=True
         )
 
-        flat = self._flatten_grads(grads)
+        # Pass device from params to ensure correct device
+        device = params[0].device if params else None
+        flat = self._flatten_grads(grads, device=device)
         return torch.mean(torch.abs(flat))  # Keep as tensor, no .item()
 
     def _compute_target_weights(
@@ -547,9 +553,9 @@ class ResidualNormalizer:
     ) -> torch.Tensor:
         """Running statistics normalization (like BatchNorm)."""
         if training:
-            # Compute batch statistics
+            # Compute batch statistics (unbiased=False for stability)
             batch_mean = residual.mean()
-            batch_var = residual.var()
+            batch_var = residual.var(unbiased=False)
 
             # Update running stats
             if name not in self.running_mean or self.running_mean[name] is None:
@@ -569,19 +575,21 @@ class ResidualNormalizer:
             self.num_batches += 1
 
             # Use batch stats during training
-            return (residual - batch_mean) / (torch.sqrt(batch_var) + self.eps)
+            # Note: sqrt(var + eps) is numerically more stable than sqrt(var) + eps
+            return (residual - batch_mean) / torch.sqrt(batch_var + self.eps)
         else:
             # Use running stats during eval
             mean = self.running_mean.get(name)
             var = self.running_var.get(name)
             if mean is None or var is None:
                 return residual
-            return (residual - mean) / (torch.sqrt(var) + self.eps)
+            return (residual - mean) / torch.sqrt(var + self.eps)
 
     def _normalize_batch(self, residual: torch.Tensor) -> torch.Tensor:
         """Simple batch normalization (zero-mean, unit-variance)."""
         mean = residual.mean()
-        std = residual.std()
+        # Use unbiased=False for more stable per-batch stats
+        std = residual.std(unbiased=False)
         return (residual - mean) / (std + self.eps)
 
     def get_scales(self) -> Dict[str, float]:
