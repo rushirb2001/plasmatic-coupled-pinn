@@ -37,8 +37,21 @@ torch.set_float32_matmul_precision('high')  # Use TensorCores on A100
 
 import pytorch_lightning as pl
 from pytorch_lightning.cli import LightningCLI, LightningArgumentParser
+from pytorch_lightning.callbacks import RichProgressBar
+from pytorch_lightning.callbacks.progress.rich_progress import RichProgressBarTheme
 
 from src.model import BasePINN, MODEL_REGISTRY
+
+
+class PreciseRichProgressBar(RichProgressBar):
+    """RichProgressBar with 6 decimal places for metrics."""
+
+    def get_metrics(self, trainer, pl_module):
+        items = super().get_metrics(trainer, pl_module)
+        # Format floats with 6 decimal places
+        return {k: f"{v:.6f}" if isinstance(v, float) else v for k, v in items.items()}
+
+
 from src.data.collocation import (
     SamplingConfig,
     create_sampler,
@@ -360,7 +373,7 @@ class PINNLightningCLI(LightningCLI):
                 },
             },
             {
-                "class_path": "pytorch_lightning.callbacks.RichProgressBar",
+                "class_path": "src.trainer.PreciseRichProgressBar",
             },
             {
                 "class_path": "pytorch_lightning.callbacks.RichModelSummary",
