@@ -186,6 +186,9 @@ class CollocationDataModule(pl.LightningDataModule):
         else:
             sampler = create_sampler(self.sampler_type, config)
 
+        # Store sampler for resampling during training
+        self.train_sampler = sampler
+
         # Generate training points and pre-load to device for faster access
         x_t = sampler.samples.to(self.device)
         self.train_dataset = TensorDataset(x_t)
@@ -229,6 +232,23 @@ class CollocationDataModule(pl.LightningDataModule):
             num_workers=0,
             pin_memory=False,
         )
+
+    def resample_train(self):
+        """
+        Resample collocation points for training.
+
+        This should be called at the start of each epoch to prevent
+        the network from overfitting to a fixed set of collocation points.
+        Fresh samples help the PINN learn the PDE everywhere, not just
+        at the initial sample locations.
+        """
+        if hasattr(self, 'train_sampler') and self.train_sampler is not None:
+            # Generate new samples
+            new_x_t = self.train_sampler.resample().to(self.device)
+            # Update the dataset tensor in-place
+            self.train_dataset.tensors[0].copy_(new_x_t)
+            return True
+        return False
 
 
 class PINNLightningCLI(LightningCLI):

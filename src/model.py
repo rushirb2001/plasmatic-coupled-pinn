@@ -580,6 +580,17 @@ class BasePINN(pl.LightningModule):
         with torch.enable_grad():
             res_cont, res_pois = self.compute_pde_residuals(x_t)
 
+        # Log RAW residual losses (for comparison with training)
+        loss_cont_raw = torch.mean(res_cont**2)
+        loss_pois_raw = torch.mean(res_pois**2)
+        self.log("val_loss_cont_raw", loss_cont_raw, on_epoch=True)
+        self.log("val_loss_pois_raw", loss_pois_raw, on_epoch=True)
+
+        # Apply normalization if enabled (with training=False to not update EMA)
+        if self.residual_normalizer is not None:
+            res_cont = self.residual_normalizer.normalize(res_cont, "continuity", training=False)
+            res_pois = self.residual_normalizer.normalize(res_pois, "poisson", training=False)
+
         loss_cont = torch.mean(res_cont**2)
         loss_pois = torch.mean(res_pois**2)
 
@@ -624,6 +635,17 @@ class BasePINN(pl.LightningModule):
 
         with torch.enable_grad():
             res_cont, res_pois = self.compute_pde_residuals(x_t)
+
+        # Log RAW residual losses
+        loss_cont_raw = torch.mean(res_cont**2)
+        loss_pois_raw = torch.mean(res_pois**2)
+        self.log("test_loss_cont_raw", loss_cont_raw, on_epoch=True)
+        self.log("test_loss_pois_raw", loss_pois_raw, on_epoch=True)
+
+        # Apply normalization if enabled (with training=False)
+        if self.residual_normalizer is not None:
+            res_cont = self.residual_normalizer.normalize(res_cont, "continuity", training=False)
+            res_pois = self.residual_normalizer.normalize(res_pois, "poisson", training=False)
 
         loss_cont = torch.mean(res_cont**2)
         loss_pois = torch.mean(res_pois**2)
@@ -717,6 +739,16 @@ class BasePINN(pl.LightningModule):
             }
 
         return optimizer
+
+    def on_train_epoch_start(self):
+        """Resample collocation points at start of each epoch."""
+        # Trigger resampling in DataModule to prevent overfitting to fixed points
+        dm = getattr(self.trainer, "datamodule", None)
+        if dm is not None and hasattr(dm, "resample_train"):
+            resampled = dm.resample_train()
+            # Log occasionally to confirm resampling is happening
+            if resampled and self.current_epoch % 100 == 0:
+                print(f"[Epoch {self.current_epoch}] Resampled collocation points")
 
     def on_train_epoch_end(self):
         """Log adaptive weights at epoch end (single CPU sync per epoch)."""

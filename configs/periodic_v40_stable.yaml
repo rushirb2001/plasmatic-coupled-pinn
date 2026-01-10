@@ -38,10 +38,11 @@ model:
 
     # Fixed loss weights (no adaptive balancing)
     # IC now enabled since compute_ic_loss excludes boundaries
+    # bc: 0.0 since exact_bc=true makes BC loss a no-op
     loss_weights:
       continuity: 1.0
       poisson: 4.0
-      bc: 10.0
+      bc: 0.0
       ic: 1.0
 
     # Disable adaptive weights to prevent double-balancing
@@ -60,7 +61,7 @@ data:
   sampler_type: uniform
   x_range: [0.0, 1.0]
   t_range: [0.0, 1.0]
-  clamp_x: false
+  clamp_x: true  # Avoid PDE residual exactly at boundaries (stiffness)
   val_grid_size: 100
   num_workers: 0
 
