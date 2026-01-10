@@ -1,15 +1,17 @@
 # LBFGS Fine-Tuning Configuration for CCP-II PINN
 # Two-stage training: Adam (10K) -> LBFGS (6K) for <1% L2 error
 #
-# Usage:
+# Usage (--fit.weights_only=true loads only model weights, ignores epoch/optimizer state):
 #   python -m src.trainer fit \
 #       --config configs/lbfgs_finetune.yaml \
-#       --ckpt_path experiments/<experiment_name>/checkpoints/last.ckpt
+#       --ckpt_path experiments/<name>/checkpoints/last.ckpt \
+#       --fit.weights_only=true
 #
 # Example:
 #   python -m src.trainer fit \
 #       --config configs/lbfgs_finetune.yaml \
-#       --ckpt_path experiments/AdaptiveSequentialPeriodicPINN_uniform_1e-04_abc123/checkpoints/last.ckpt
+#       --ckpt_path experiments/AdaptiveSequentialPeriodicPINN_uniform_1e-04_abc123/checkpoints/last.ckpt \
+#       --fit.weights_only=true
 
 # Experiment settings
 auto_name: true
