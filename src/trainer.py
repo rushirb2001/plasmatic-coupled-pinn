@@ -141,6 +141,9 @@ class CollocationDataModule(pl.LightningDataModule):
         beta_param: Beta parameter for beta sampling
         val_grid_size: Grid size for validation (nx=nt)
         num_workers: Number of data loading workers
+        resample_every_epoch: Whether to resample collocation points each epoch (default: True)
+        pregenerate_epochs: Number of epochs to pre-generate samples for (0=disabled, live resampling)
+        debug_collocation: Print sample statistics each epoch for verification (default: False)
     """
 
     def __init__(
@@ -154,6 +157,9 @@ class CollocationDataModule(pl.LightningDataModule):
         beta_param: float = 1.0,
         val_grid_size: int = 100,
         num_workers: int = 0,
+        resample_every_epoch: bool = True,
+        pregenerate_epochs: int = 0,
+        debug_collocation: bool = False,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -167,6 +173,13 @@ class CollocationDataModule(pl.LightningDataModule):
         self.beta_param = beta_param
         self.val_grid_size = val_grid_size
         self.num_workers = num_workers
+        self.resample_every_epoch = resample_every_epoch
+        self.pregenerate_epochs = pregenerate_epochs
+        self.debug_collocation = debug_collocation
+
+        # Pre-generation storage
+        self._pregenerated_samples: Optional[torch.Tensor] = None
+        self._current_epoch_idx: int = 0
 
         # Determine device
         if torch.cuda.is_available():
@@ -202,9 +215,16 @@ class CollocationDataModule(pl.LightningDataModule):
         # Store sampler for resampling during training
         self.train_sampler = sampler
 
-        # Generate training points and pre-load to device for faster access
-        x_t = sampler.samples.to(self.device)
-        self.train_dataset = TensorDataset(x_t)
+        # Pre-generate samples for multiple epochs or use single batch
+        if self.pregenerate_epochs > 0:
+            self._pregenerate_all_epochs()
+        else:
+            # Original behavior: single batch, pre-load to device
+            x_t = sampler.samples.to(self.device)
+            self.train_dataset = TensorDataset(x_t)
+
+            if self.debug_collocation:
+                self._debug_print_sample_stats(x_t, "initial setup")
 
         # Validation: always use grid for consistent evaluation
         val_config = SamplingConfig(
@@ -246,21 +266,121 @@ class CollocationDataModule(pl.LightningDataModule):
             pin_memory=False,
         )
 
-    def resample_train(self):
-        """
-        Resample collocation points for training.
+    def _pregenerate_all_epochs(self):
+        """Pre-generate collocation points for multiple epochs."""
+        n_epochs = self.pregenerate_epochs
+        n_points = self.num_points
 
-        This should be called at the start of each epoch to prevent
-        the network from overfitting to a fixed set of collocation points.
-        Fresh samples help the PINN learn the PDE everywhere, not just
-        at the initial sample locations.
+        if self.debug_collocation:
+            print(f"[Collocation] Pre-generating {n_epochs} epochs x {n_points} points on {self.device}")
+
+        # Strategy varies by sampler type
+        if self.sampler_type == "uniform":
+            # Generate all on GPU directly - most efficient
+            self._pregenerated_samples = self._pregenerate_uniform_gpu(n_epochs, n_points)
+        elif self.sampler_type == "grid":
+            # Grid is deterministic - just store single copy
+            self._pregenerated_samples = self.train_sampler.samples.to(self.device).unsqueeze(0)
+            if self.debug_collocation:
+                print("[Collocation] Grid sampler: using single deterministic batch (no variation)")
+        else:
+            # CPU-bound samplers (lhs, beta): generate all, transfer once
+            self._pregenerated_samples = self._pregenerate_cpu_samplers(n_epochs, n_points)
+
+        # Initialize with first epoch's samples
+        self.train_dataset = TensorDataset(self._pregenerated_samples[0].clone())
+        self._current_epoch_idx = 0
+
+        if self.debug_collocation:
+            mem_mb = self._pregenerated_samples.numel() * 4 / (1024 * 1024)
+            print(f"[Collocation] Pre-generated shape: {self._pregenerated_samples.shape}, memory: {mem_mb:.2f} MB")
+            self._debug_print_sample_stats(self._pregenerated_samples[0], "epoch 0")
+
+    def _pregenerate_uniform_gpu(self, n_epochs: int, n_points: int) -> torch.Tensor:
+        """Generate uniform samples directly on GPU - zero CPU-GPU transfer."""
+        x_scale = self.x_range[1] - self.x_range[0]
+        x_offset = self.x_range[0]
+        t_scale = self.t_range[1] - self.t_range[0]
+        t_offset = self.t_range[0]
+
+        # Generate all samples on GPU
+        x = torch.rand(n_epochs, n_points, 1, device=self.device) * x_scale + x_offset
+        t = torch.rand(n_epochs, n_points, 1, device=self.device) * t_scale + t_offset
+
+        if self.clamp_x:
+            eps = 1e-8
+            x = x.clamp(self.x_range[0] + eps, self.x_range[1] - eps)
+
+        return torch.cat([x, t], dim=2)  # Shape: [n_epochs, n_points, 2]
+
+    def _pregenerate_cpu_samplers(self, n_epochs: int, n_points: int) -> torch.Tensor:
+        """Pre-generate samples from CPU-bound samplers (LHS, Beta, etc.)."""
+        samples_list = []
+
+        for i in range(n_epochs):
+            # Resample to get new points
+            if i == 0:
+                batch = self.train_sampler.samples
+            else:
+                batch = self.train_sampler.resample()
+            samples_list.append(batch)
+
+            if self.debug_collocation and i < 3:
+                print(f"[Collocation] Generated batch {i}: mean_x={batch[:, 0].mean():.4f}, mean_t={batch[:, 1].mean():.4f}")
+
+        # Stack and transfer to GPU once
+        all_samples = torch.stack(samples_list, dim=0).to(self.device)
+        return all_samples  # Shape: [n_epochs, n_points, 2]
+
+    def _debug_print_sample_stats(self, samples: torch.Tensor, source: str):
+        """Print sample statistics for debugging."""
+        x, t = samples[:, 0], samples[:, 1]
+        # Use sum as a quick hash for uniqueness verification
+        sample_hash = int(samples.sum().item() * 1e6) % 1000000
+        print(f"[Collocation] {source}:")
+        print(f"  x: mean={x.mean():.6f}, std={x.std():.6f}, min={x.min():.6f}, max={x.max():.6f}")
+        print(f"  t: mean={t.mean():.6f}, std={t.std():.6f}, min={t.min():.6f}, max={t.max():.6f}")
+        print(f"  hash: {sample_hash}")
+
+    def resample_train(self) -> bool:
         """
-        if hasattr(self, 'train_sampler') and self.train_sampler is not None:
-            # Generate new samples
-            new_x_t = self.train_sampler.resample().to(self.device)
-            # Update the dataset tensor in-place
+        Resample or cycle collocation points for training.
+
+        Behavior depends on configuration:
+        - resample_every_epoch=False: No resampling, use fixed points
+        - pregenerate_epochs>0: Cycle through pre-generated samples
+        - Otherwise: Live resampling (original behavior)
+
+        Returns:
+            True if samples were updated, False otherwise.
+        """
+        # Check if resampling is disabled
+        if not self.resample_every_epoch:
+            if self.debug_collocation:
+                print("[Collocation] Resampling disabled, using fixed points")
+            return False
+
+        # Use pre-generated samples if available
+        if self._pregenerated_samples is not None:
+            self._current_epoch_idx = (self._current_epoch_idx + 1) % len(self._pregenerated_samples)
+            new_x_t = self._pregenerated_samples[self._current_epoch_idx]
+
+            if self.debug_collocation:
+                self._debug_print_sample_stats(new_x_t, f"pre-gen epoch {self._current_epoch_idx}")
+
             self.train_dataset.tensors[0].copy_(new_x_t)
             return True
+
+        # Original behavior: live resampling
+        if hasattr(self, 'train_sampler') and self.train_sampler is not None:
+            new_x_t = self.train_sampler.resample().to(self.device)
+
+            if self.debug_collocation:
+                self._debug_print_sample_stats(new_x_t, "live resample")
+
+            self.train_dataset.tensors[0].copy_(new_x_t)
+            return True
+
         return False
 
 

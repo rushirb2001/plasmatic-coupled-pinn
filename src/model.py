@@ -703,8 +703,8 @@ class BasePINN(pl.LightningModule):
             optimizer = torch.optim.LBFGS(
                 self.parameters(),
                 lr=self.learning_rate,
-                max_iter=20,           # Inner iterations per step
-                history_size=50,       # Number of past updates to store
+                max_iter=60,           # Inner iterations per step
+                history_size=30,       # Number of past updates to store
                 line_search_fn='strong_wolfe'  # Wolfe line search for stability
             )
         else:

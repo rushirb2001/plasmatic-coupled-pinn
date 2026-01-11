@@ -40,6 +40,10 @@ data:
   t_range: [0.0, 1.0]
   val_grid_size: 100
   num_workers: 0
+  # Collocation resampling options
+  resample_every_epoch: true      # Resample collocation points each epoch
+  pregenerate_epochs: 0           # Pre-generate N epochs (0=live resampling)
+  debug_collocation: false        # Print sample stats for verification
 
 # Trainer configuration
 trainer:
