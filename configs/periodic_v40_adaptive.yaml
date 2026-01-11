@@ -34,12 +34,16 @@ model:
     scheduler: constant
     weight_decay: 0.0
 
+    # Soft n_e BC: FDM-consistent boundary (n_e at boundaries evolved by PDE)
+    soft_bc_ne: true  # Default true - matches FDM physics
+
     # Loss balancing (modular)
     loss_weights:
       continuity: 1.0
       poisson: 1.0
       bc: 10.0
       ic: 0.0
+      ne_bc: 1.0  # Soft n_e BC loss - penalizes large boundary n_e values
     # Adaptive loss balancing
     # Strategies: max, mean, rms, softmax
     use_adaptive_weights: true

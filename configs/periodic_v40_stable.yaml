@@ -18,6 +18,7 @@ model:
     max_t_harmonic: 4
     exact_bc: true
     use_exp_ne: true
+    soft_bc_ne: true  # FDM-consistent n_e boundary (evolved by PDE, not fixed to zero)
 
     # Physics
     params_path: configs/physics/v40.yaml
@@ -44,6 +45,7 @@ model:
       poisson: 4.0
       bc: 0.0
       ic: 1.0
+      ne_bc: 1.0  # Soft n_e BC loss - penalizes large boundary n_e values
 
     # Disable adaptive weights to prevent double-balancing
     use_adaptive_weights: false

@@ -241,6 +241,7 @@ class BasePINN(pl.LightningModule):
             "loss_pois": torchmetrics.MeanMetric(),
             "loss_bc": torchmetrics.MeanMetric(),
             "loss_ic": torchmetrics.MeanMetric(),
+            "loss_ne_bc": torchmetrics.MeanMetric(),
         })
         self.val_metrics = self.train_metrics.clone(prefix="val_")
         self.test_metrics = self.train_metrics.clone(prefix="test_")
@@ -418,6 +419,46 @@ class BasePINN(pl.LightningModule):
 
         return loss_left + loss_right
 
+    def compute_soft_ne_bc_loss(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        Compute soft boundary condition loss for n_e.
+
+        This matches the FDM's flux-based boundary treatment where n_e at
+        boundaries is evolved by the PDE (not fixed to zero). The FDM uses
+        ghost cells with n_e=0 outside the domain, but the actual boundary
+        points have small positive n_e values determined by flux balance.
+
+        The soft BC penalizes large n_e at boundaries but doesn't force
+        exactly zero, allowing the network to learn the correct small
+        boundary values that the FDM produces.
+
+        Args:
+            t: Time values tensor of shape [B, 1]
+
+        Returns:
+            Scalar loss penalizing boundary n_e values
+        """
+        B = t.shape[0]
+        device = t.device
+
+        # Left boundary (x=0)
+        x_left = torch.zeros(B, 1, device=device)
+        x_t_left = torch.cat([x_left, t], dim=1)
+        n_e_left, _ = self(x_t_left)
+
+        # Right boundary (x=1)
+        x_right = torch.ones(B, 1, device=device)
+        x_t_right = torch.cat([x_right, t], dim=1)
+        n_e_right, _ = self(x_t_right)
+
+        # Penalize boundary n_e values
+        # The FDM has n_e at boundaries ~0.02-0.03% of bulk on average,
+        # but can peak at ~50% during certain RF phases.
+        # We want small values, not exactly zero.
+        loss = torch.mean(n_e_left**2) + torch.mean(n_e_right**2)
+
+        return loss
+
     def compute_ic_loss(self) -> torch.Tensor:
         """
         Compute initial condition loss.
@@ -534,6 +575,16 @@ class BasePINN(pl.LightningModule):
         else:
             loss_bc = zero
 
+        # Soft n_e BC loss: penalize boundary n_e values (matches FDM flux-based BC)
+        # Only compute if soft_bc_ne is True (model uses soft BC) AND weight > 0
+        ne_bc_weight = self.loss_weights.get("ne_bc", 0.0)
+        has_soft_bc_ne = getattr(self, "soft_bc_ne", False)
+        if has_soft_bc_ne and ne_bc_weight > 0:
+            t = x_t[:, 1:2]
+            loss_ne_bc = self.compute_soft_ne_bc_loss(t)
+        else:
+            loss_ne_bc = zero
+
         # Get loss weights (static or adaptive)
         if self.loss_balancer is not None:
             # Only include losses with weight > 0 in adaptive balancing
@@ -542,6 +593,8 @@ class BasePINN(pl.LightningModule):
                 losses["ic"] = loss_ic
             if not self.exact_bc and bc_weight > 0:
                 losses["bc"] = loss_bc
+            if has_soft_bc_ne and ne_bc_weight > 0:
+                losses["ne_bc"] = loss_ne_bc
 
             # Use cached params (avoid list() every step)
             if self._cached_params is None:
@@ -560,12 +613,15 @@ class BasePINN(pl.LightningModule):
             loss = loss + weights["ic"] * loss_ic
         if not self.exact_bc and bc_weight > 0:
             loss = loss + weights["bc"] * loss_bc
+        if has_soft_bc_ne and ne_bc_weight > 0:
+            loss = loss + weights.get("ne_bc", ne_bc_weight) * loss_ne_bc
 
         # Metrics (update on GPU, no sync)
         self.train_metrics["loss_cont"].update(loss_cont)
         self.train_metrics["loss_pois"].update(loss_pois)
         self.train_metrics["loss_ic"].update(loss_ic)
         self.train_metrics["loss_bc"].update(loss_bc)
+        self.train_metrics["loss_ne_bc"].update(loss_ne_bc)
 
         self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log_dict(self.train_metrics, on_step=False, on_epoch=True)
@@ -609,6 +665,15 @@ class BasePINN(pl.LightningModule):
         else:
             loss_bc = zero
 
+        # Soft n_e BC loss: penalize boundary n_e values
+        ne_bc_weight = self.loss_weights.get("ne_bc", 0.0)
+        has_soft_bc_ne = getattr(self, "soft_bc_ne", False)
+        if has_soft_bc_ne and ne_bc_weight > 0:
+            t = x_t[:, 1:2]
+            loss_ne_bc = self.compute_soft_ne_bc_loss(t)
+        else:
+            loss_ne_bc = zero
+
         loss = (
             self.loss_weights["continuity"] * loss_cont +
             self.loss_weights["poisson"] * loss_pois
@@ -617,11 +682,14 @@ class BasePINN(pl.LightningModule):
             loss = loss + self.loss_weights["ic"] * loss_ic
         if not self.exact_bc and bc_weight > 0:
             loss = loss + self.loss_weights["bc"] * loss_bc
+        if has_soft_bc_ne and ne_bc_weight > 0:
+            loss = loss + self.loss_weights.get("ne_bc", ne_bc_weight) * loss_ne_bc
 
         self.val_metrics["loss_cont"].update(loss_cont)
         self.val_metrics["loss_pois"].update(loss_pois)
         self.val_metrics["loss_ic"].update(loss_ic)
         self.val_metrics["loss_bc"].update(loss_bc)
+        self.val_metrics["loss_ne_bc"].update(loss_ne_bc)
 
         self.log("val_loss", loss, on_epoch=True, prog_bar=True)
         self.log_dict(self.val_metrics, on_step=False, on_epoch=True)
@@ -657,13 +725,25 @@ class BasePINN(pl.LightningModule):
         else:
             loss_ic = zero
 
+        # Soft n_e BC loss: penalize boundary n_e values
+        ne_bc_weight = self.loss_weights.get("ne_bc", 0.0)
+        has_soft_bc_ne = getattr(self, "soft_bc_ne", False)
+        if has_soft_bc_ne and ne_bc_weight > 0:
+            t = x_t[:, 1:2]
+            loss_ne_bc = self.compute_soft_ne_bc_loss(t)
+        else:
+            loss_ne_bc = zero
+
         loss = loss_cont + loss_pois
         if ic_weight > 0:
             loss = loss + loss_ic
+        if has_soft_bc_ne and ne_bc_weight > 0:
+            loss = loss + loss_ne_bc
 
         self.test_metrics["loss_cont"].update(loss_cont)
         self.test_metrics["loss_pois"].update(loss_pois)
         self.test_metrics["loss_ic"].update(loss_ic)
+        self.test_metrics["loss_ne_bc"].update(loss_ne_bc)
 
         self.log("test_loss", loss, on_epoch=True, prog_bar=True)
         self.log_dict(self.test_metrics, on_step=False, on_epoch=True)
@@ -834,7 +914,11 @@ class SequentialPeriodicPINN(BasePINN):
     - Spatial x uses FourierFeatureMapping1D (dyadic frequencies)
     - Time t uses PeriodicTimeEmbedding (pure harmonics, no raw t)
     - Applies exp() to n_e for positivity before BC enforcement
-    - Exact boundary condition enforcement
+    - Exact boundary condition enforcement for phi
+
+    IMPORTANT: For n_e boundary conditions, the FDM uses a flux-based approach
+    where boundary n_e is evolved by the PDE (not fixed to zero). Use soft_bc_ne=True
+    (default) to match FDM behavior with soft BC loss penalty.
 
     This is ideal for RF-driven plasma simulations where the solution
     must repeat every RF cycle.
@@ -843,8 +927,9 @@ class SequentialPeriodicPINN(BasePINN):
         hidden_layers: List of hidden layer dimensions
         num_ffm_frequencies: Number of dyadic frequencies for spatial FFM
         max_t_harmonic: Number of time harmonics (k=1..max_t_harmonic)
-        exact_bc: Whether to enforce exact boundary conditions
+        exact_bc: Whether to enforce exact boundary conditions for phi
         use_exp_ne: Whether to apply exp() to n_e for positivity
+        soft_bc_ne: If True (default), use soft BC for n_e (matches FDM)
     """
 
     def __init__(
@@ -854,12 +939,14 @@ class SequentialPeriodicPINN(BasePINN):
         max_t_harmonic: int = 4,
         exact_bc: bool = True,
         use_exp_ne: bool = True,
+        soft_bc_ne: bool = True,
         **kwargs: Any
     ):
         # Store these before calling super().__init__()
         self.num_ffm_frequencies = num_ffm_frequencies
         self.max_t_harmonic = max_t_harmonic
         self.use_exp_ne = use_exp_ne
+        self.soft_bc_ne = soft_bc_ne
         # Pass exact_bc to parent class
         super().__init__(hidden_layers=hidden_layers, exact_bc=exact_bc, **kwargs)
 
@@ -871,6 +958,7 @@ class SequentialPeriodicPINN(BasePINN):
             max_t_harmonic=self.max_t_harmonic,
             exact_bc=self.exact_bc,
             use_exp_ne=self.use_exp_ne,
+            soft_bc_ne=self.soft_bc_ne,
         )
 
 

@@ -118,12 +118,19 @@ class SequentialModelPeriodic(nn.Module):
     - Time t uses PeriodicTimeEmbedding (pure harmonics, no raw t)
     - Applies exp() to n_e for positivity before BC enforcement
 
+    IMPORTANT: For n_e boundary conditions, the FDM uses a flux-based approach
+    where boundary n_e is computed from the PDE (not fixed to zero). The
+    `soft_bc_ne` parameter controls whether to use:
+    - soft_bc_ne=True: No hard BC on n_e (matches FDM behavior, use soft BC loss)
+    - soft_bc_ne=False: Hard BC via x(1-x) multiplier (legacy behavior)
+
     Args:
         layers: Hidden layer sizes + output size (e.g., [256, 256, 256, 2])
         num_ffm_frequencies: Number of dyadic frequencies for spatial FFM
         max_t_harmonic: Number of time harmonics (k=1..max_t_harmonic)
-        exact_bc: Whether to enforce exact boundary conditions
+        exact_bc: Whether to enforce exact boundary conditions for phi
         use_exp_ne: Whether to apply exp() to n_e for positivity
+        soft_bc_ne: If True, don't enforce hard n_e=0 BC (use soft BC loss instead)
     """
 
     def __init__(
@@ -133,6 +140,7 @@ class SequentialModelPeriodic(nn.Module):
         max_t_harmonic: int = 4,
         exact_bc: bool = True,
         use_exp_ne: bool = True,
+        soft_bc_ne: bool = True,
     ):
         super().__init__()
         if layers is None:
@@ -143,6 +151,7 @@ class SequentialModelPeriodic(nn.Module):
         self.activation = nn.Tanh()
         self.exact_bc = exact_bc
         self.use_exp_ne = use_exp_ne
+        self.soft_bc_ne = soft_bc_ne
 
         # Input dim = FFM(x) features + periodic time features
         input_dim = self.ffm_x.out_dim + self.t_periodic.out_dim
@@ -176,19 +185,26 @@ class SequentialModelPeriodic(nn.Module):
         n_e_head = output[:, 0:1]
         phi_head = output[:, 1:2]
 
-        # Apply exp for positivity (matches archive script)
+        # Apply exp for positivity
         if self.use_exp_ne:
             n_e = torch.exp(n_e_head)
         else:
-            n_e = n_e_head
+            n_e = torch.nn.functional.softplus(n_e_head)
 
-        if self.exact_bc:
-            # n_e(0,t) = n_e(1,t) = 0, enforced via x(1-x) multiplier
+        # n_e boundary conditions
+        if self.soft_bc_ne:
+            # FDM-consistent: n_e at boundaries is evolved by PDE, not fixed to zero
+            # Use soft BC loss to penalize large boundary values
+            # No x(1-x) multiplier - network learns correct small boundary values
+            pass  # n_e unchanged
+        elif self.exact_bc:
+            # Legacy behavior: hard BC n_e(0,t) = n_e(1,t) = 0
             n_e = x_raw * (1 - x_raw) * n_e
 
-            # phi(0,t) = sin(2πt), phi(1,t) = 0
-            # The sin(2πt) term is 1-periodic, and phi_head depends only on
-            # periodic features, so the full phi is exactly 1-periodic
+        # phi boundary conditions (always exact - this IS correct for FDM)
+        if self.exact_bc:
+            # phi(0,t) = 0 (grounded), phi(1,t) = sin(2πt) (driven electrode)
+            # Ansatz: phi = x*sin(2πt) + x(1-x)*NN ensures exact BCs
             phi = x_raw * torch.sin(2 * math.pi * t_raw) + x_raw * (1 - x_raw) * phi_head
         else:
             phi = phi_head
